@@ -1,133 +1,122 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
-from datetime import datetime
 
 app = FastAPI()
 
-# 🔥 CORS CONFIGURATION
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production we can restrict this
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 CURRENT_YEAR = 2026
 
-# ---------- SCORING CONSTANTS ----------
-BATTERY_AVG_VALUE = 8000
-UPGRADE_AVG_VALUE = 6000
-MAINTENANCE_AVG_VALUE = 900
+# --- Load data ---
+df = pd.read_csv("demo_clients.csv")
 
-BATTERY_CLOSE_PROB = 0.35
-UPGRADE_CLOSE_PROB = 0.25
-MAINTENANCE_CLOSE_PROB = 0.05
+df["years_since_install"] = CURRENT_YEAR - df["install_year"]
+df["years_since_contact"] = CURRENT_YEAR - df["last_contact_year"]
 
-EFFORT_BATTERY = 4
-EFFORT_UPGRADE = 3
-EFFORT_MAINTENANCE = 5
+# --- SCORING LOGIC ---
 
+def score_row(row):
+    battery_score = 0
+    upgrade_score = 0
+    maintenance_score = 0
 
-def load_and_score():
-    df = pd.read_csv("demo_clients.csv")
+    # Battery
+    if not row["has_battery"]:
+        battery_score += 20
+    if row["years_since_install"] >= 5:
+        battery_score += 15
+    if row["location_type"] == "coastal":
+        battery_score += 20
 
-    df["years_since_install"] = CURRENT_YEAR - df["install_year"]
-    df["years_since_contact"] = CURRENT_YEAR - df["last_contact_year"]
+    # Upgrade
+    if row["system_kw"] < 6:
+        upgrade_score += 20
+    if row["years_since_install"] >= 3:
+        upgrade_score += 20
 
-    def score_battery(row):
-        score = 0
-        if not row["has_battery"]:
-            score += 10
-        if row["years_since_install"] >= 2:
-            score += 5
-        if row["system_kw"] >= 5:
-            score += 5
-        if row["location_type"] == "coastal":
-            score += 5
-        return score
+    # Maintenance
+    if row["years_since_contact"] >= 4:
+        maintenance_score += 25
+    if row["client_type"] == "commercial":
+        maintenance_score += 20
 
-    def score_upgrade(row):
-        score = 0
-        if row["years_since_install"] >= 3:
-            score += 10
-        if row["system_kw"] <= 5:
-            score += 10
-        if row["years_since_contact"] >= 2:
-            score += 5
-        return score
+    total_score = max(battery_score, upgrade_score, maintenance_score)
 
-    def score_maintenance(row):
-        score = 0
-        if row["years_since_contact"] >= 3:
-            score += 15
-        if row["client_type"] == "commercial":
-            score += 5
-        return score
+    if total_score == battery_score:
+        main_opportunity = "Battery"
+        estimated_value = 8000
+        close_probability = 0.35 if total_score >= 60 else 0.25
+        effort_score = 4 if total_score >= 60 else 3
 
-    df["battery_score"] = df.apply(score_battery, axis=1)
-    df["upgrade_score"] = df.apply(score_upgrade, axis=1)
-    df["maintenance_score"] = df.apply(score_maintenance, axis=1)
+    elif total_score == upgrade_score:
+        main_opportunity = "Upgrade"
+        estimated_value = 6000
+        close_probability = 0.30
+        effort_score = 3
 
-    df["total_score"] = (
-        df["battery_score"]
-        + df["upgrade_score"]
-        + df["maintenance_score"]
-    )
+    else:
+        main_opportunity = "Maintenance"
+        estimated_value = 900
+        close_probability = 0.05
+        effort_score = 5
 
-    def main_opportunity(row):
-        scores = {
-            "Battery": row["battery_score"],
-            "Upgrade": row["upgrade_score"],
-            "Maintenance": row["maintenance_score"],
-        }
-        return max(scores, key=scores.get)
+    expected_value = estimated_value * close_probability
+    priority_score = expected_value / effort_score
 
-    df["main_opportunity"] = df.apply(main_opportunity, axis=1)
+    return pd.Series([
+        main_opportunity,
+        total_score,
+        estimated_value,
+        close_probability,
+        expected_value,
+        effort_score,
+        priority_score
+    ])
 
-    def estimated_value(row):
-        if row["main_opportunity"] == "Battery":
-            return BATTERY_AVG_VALUE
-        elif row["main_opportunity"] == "Upgrade":
-            return UPGRADE_AVG_VALUE
-        else:
-            return MAINTENANCE_AVG_VALUE
+df[[
+    "main_opportunity",
+    "total_score",
+    "estimated_value",
+    "close_probability",
+    "expected_value",
+    "effort_score",
+    "priority_score"
+]] = df.apply(score_row, axis=1)
 
-    df["estimated_value"] = df.apply(estimated_value, axis=1)
-    df["close_probability"] = df["main_opportunity"].map({
-        "Battery": BATTERY_CLOSE_PROB,
-        "Upgrade": UPGRADE_CLOSE_PROB,
-        "Maintenance": MAINTENANCE_CLOSE_PROB,
-    })
-
-    df["expected_value"] = df["estimated_value"] * df["close_probability"]
-
-    df["effort_score"] = df["main_opportunity"].map({
-        "Battery": EFFORT_BATTERY,
-        "Upgrade": EFFORT_UPGRADE,
-        "Maintenance": EFFORT_MAINTENANCE,
-    })
-
-    df["priority_score"] = df["expected_value"] / df["effort_score"]
-
-    return df.sort_values(by="priority_score", ascending=False)
-
-
-@app.get("/top20")
-def get_top20():
-    df = load_and_score()
-    return df.head(20).to_dict(orient="records")
-
+# --- ENDPOINTS ---
 
 @app.get("/top20-simple")
-def get_top20_simple():
-    df = load_and_score()
-    top = df.head(20)[[
+def top20_simple():
+    result = df.sort_values(by="priority_score", ascending=False).head(20)
+    return result[[
         "client_name",
         "main_opportunity",
         "total_score",
         "expected_value",
         "priority_score"
-    ]]
-    return top.to_dict(orient="records")
+    ]].to_dict(orient="records")
+
+
+@app.get("/executive-summary")
+def executive_summary():
+    total_clients = len(df)
+    total_pipeline_value = df["estimated_value"].sum()
+    total_expected_value = df["expected_value"].sum()
+    high_priority_clients = len(df[df["priority_score"] >= 600])
+    top_opportunity_type = df["main_opportunity"].value_counts().idxmax()
+
+    return {
+        "total_clients": int(total_clients),
+        "total_pipeline_value": float(total_pipeline_value),
+        "total_expected_value": float(total_expected_value),
+        "high_priority_clients": int(high_priority_clients),
+        "top_opportunity_type": top_opportunity_type
+    }
