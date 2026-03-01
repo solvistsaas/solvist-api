@@ -1,0 +1,11 @@
+client_id,client_name,install_year,system_kw,client_type,has_battery,location_type,last_contact_year
+1,Cliente A,2020,6,residential,FALSE,coastal,2021
+2,Cliente B,2023,4,residential,FALSE,urban,2024
+3,Cliente C,2019,12,commercial,TRUE,industrial,2022
+4,Cliente D,2018,8,residential,FALSE,coastal,2020
+5,Cliente E,2021,5,residential,FALSE,urban,2023
+6,Cliente F,2017,10,commercial,FALSE,industrial,2019
+7,Cliente G,2022,7,residential,FALSE,urban,2023
+8,Cliente H,2016,15,commercial,TRUE,industrial,2020
+9,Cliente I,2019,9,residential,FALSE,coastal,2021
+10,Cliente J,2021,6,residential,FALSE,urban,2024
