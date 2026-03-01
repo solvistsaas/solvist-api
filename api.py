@@ -68,8 +68,8 @@ def score_row(row):
         close_probability = 0.05
         effort_score = 5
 
-    expected_value = estimated_value * close_probability
-    priority_score = expected_value / effort_score
+    expected_value = round(estimated_value * close_probability, 2)
+    priority_score = round(expected_value / effort_score)
 
     return pd.Series([
         main_opportunity,
@@ -108,15 +108,15 @@ def top20_simple():
 @app.get("/executive-summary")
 def executive_summary():
     total_clients = len(df)
-    total_pipeline_value = df["estimated_value"].sum()
-    total_expected_value = df["expected_value"].sum()
+    total_pipeline_value = round(df["estimated_value"].sum(), 2)
+    total_expected_value = round(df["expected_value"].sum(), 2)
     high_priority_clients = len(df[df["priority_score"] >= 600])
     top_opportunity_type = df["main_opportunity"].value_counts().idxmax()
 
     return {
         "total_clients": int(total_clients),
-        "total_pipeline_value": float(total_pipeline_value),
-        "total_expected_value": float(total_expected_value),
+        "total_pipeline_value": total_pipeline_value,
+        "total_expected_value": total_expected_value,
         "high_priority_clients": int(high_priority_clients),
         "top_opportunity_type": top_opportunity_type
     }
