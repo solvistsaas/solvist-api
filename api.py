@@ -1,26 +1,37 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
+from datetime import datetime
 
 app = FastAPI()
 
+# 🔥 CORS CONFIGURATION
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production we can restrict this
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 CURRENT_YEAR = 2026
 
-COUNTRY_CONFIG = {
-    "Spain": {
-        "kwh_price": 0.22,
-        "vat": 0.21,
-        "battery_multiplier": 1.0
-    }
-}
+# ---------- SCORING CONSTANTS ----------
+BATTERY_AVG_VALUE = 8000
+UPGRADE_AVG_VALUE = 6000
+MAINTENANCE_AVG_VALUE = 900
 
-ACTIVE_COUNTRY = "Spain"
-config = COUNTRY_CONFIG[ACTIVE_COUNTRY]
+BATTERY_CLOSE_PROB = 0.35
+UPGRADE_CLOSE_PROB = 0.25
+MAINTENANCE_CLOSE_PROB = 0.05
+
+EFFORT_BATTERY = 4
+EFFORT_UPGRADE = 3
+EFFORT_MAINTENANCE = 5
 
 
-def run_activation_engine():
+def load_and_score():
     df = pd.read_csv("demo_clients.csv")
-    df.columns = df.columns.str.strip()
-    df["has_battery"] = df["has_battery"].astype(str).str.upper() == "TRUE"
 
     df["years_since_install"] = CURRENT_YEAR - df["install_year"]
     df["years_since_contact"] = CURRENT_YEAR - df["last_contact_year"]
@@ -39,21 +50,19 @@ def run_activation_engine():
 
     def score_upgrade(row):
         score = 0
-        if row["system_kw"] <= 8:
-            score += 10
         if row["years_since_install"] >= 3:
-            score += 5
+            score += 10
+        if row["system_kw"] <= 5:
+            score += 10
         if row["years_since_contact"] >= 2:
             score += 5
         return score
 
     def score_maintenance(row):
         score = 0
-        if row["years_since_install"] >= 3:
-            score += 10
-        if row["location_type"] == "coastal":
-            score += 5
-        if row["years_since_contact"] >= 2:
+        if row["years_since_contact"] >= 3:
+            score += 15
+        if row["client_type"] == "commercial":
             score += 5
         return score
 
@@ -77,54 +86,48 @@ def run_activation_engine():
 
     df["main_opportunity"] = df.apply(main_opportunity, axis=1)
 
-    BASE_BATTERY_VALUE = 8000
-    BASE_UPGRADE_VALUE = 6000
-    BASE_MAINTENANCE_VALUE = 900
-
     def estimated_value(row):
         if row["main_opportunity"] == "Battery":
-            return BASE_BATTERY_VALUE * config["battery_multiplier"]
+            return BATTERY_AVG_VALUE
         elif row["main_opportunity"] == "Upgrade":
-            return BASE_UPGRADE_VALUE
+            return UPGRADE_AVG_VALUE
         else:
-            return BASE_MAINTENANCE_VALUE
+            return MAINTENANCE_AVG_VALUE
 
     df["estimated_value"] = df.apply(estimated_value, axis=1)
-    df["estimated_value_with_vat"] = df["estimated_value"] * (1 + config["vat"])
+    df["close_probability"] = df["main_opportunity"].map({
+        "Battery": BATTERY_CLOSE_PROB,
+        "Upgrade": UPGRADE_CLOSE_PROB,
+        "Maintenance": MAINTENANCE_CLOSE_PROB,
+    })
 
-    def close_probability(score):
-        if score >= 60:
-            return 0.35
-        elif score >= 50:
-            return 0.25
-        elif score >= 40:
-            return 0.15
-        else:
-            return 0.05
+    df["expected_value"] = df["estimated_value"] * df["close_probability"]
 
-    df["close_probability"] = df["total_score"].apply(close_probability)
-    df["expected_value"] = df["estimated_value_with_vat"] * df["close_probability"]
+    df["effort_score"] = df["main_opportunity"].map({
+        "Battery": EFFORT_BATTERY,
+        "Upgrade": EFFORT_UPGRADE,
+        "Maintenance": EFFORT_MAINTENANCE,
+    })
 
-    def effort_score(row):
-        effort = 3
-        if row["years_since_install"] <= 2:
-            effort -= 1
-        if row["years_since_contact"] <= 1:
-            effort -= 1
-        if row["client_type"] == "commercial":
-            effort += 1
-        if row["years_since_contact"] >= 3:
-            effort += 1
-        return max(1, min(5, effort))
-
-    df["effort_score"] = df.apply(effort_score, axis=1)
     df["priority_score"] = df["expected_value"] / df["effort_score"]
 
-    top_20 = df.sort_values(by="priority_score", ascending=False).head(20)
-
-    return top_20.to_dict(orient="records")
+    return df.sort_values(by="priority_score", ascending=False)
 
 
 @app.get("/top20")
-def get_top_20():
-    return run_activation_engine()
+def get_top20():
+    df = load_and_score()
+    return df.head(20).to_dict(orient="records")
+
+
+@app.get("/top20-simple")
+def get_top20_simple():
+    df = load_and_score()
+    top = df.head(20)[[
+        "client_name",
+        "main_opportunity",
+        "total_score",
+        "expected_value",
+        "priority_score"
+    ]]
+    return top.to_dict(orient="records")
