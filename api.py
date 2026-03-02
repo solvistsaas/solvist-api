@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-from datetime import datetime
+from supabase import create_client
+from pydantic import BaseModel
+import os
 
 app = FastAPI()
 
@@ -14,114 +15,79 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CURRENT_YEAR = 2026
+# --- Supabase connection ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
-# --- Load CSV ---
-df = pd.read_csv("demo_clients.csv")
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise Exception("Supabase environment variables not set")
 
-# --- Derived fields ---
-df["years_since_install"] = CURRENT_YEAR - df["install_year"]
-df["years_since_contact"] = CURRENT_YEAR - df["last_contact_year"]
+supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# --- SCORING ENGINE V1 ---
-def score_row(row):
-    score = 0
-    drivers = []
 
-    # 1️⃣ AGE SCORE (max 35 pts)
-    if 2 <= row["years_since_install"] <= 5:
-        score += 35
-        drivers.append("Optimal upgrade age window")
-    elif row["years_since_install"] > 5:
-        score += 20
-        drivers.append("System mature for expansion")
-
-    # 2️⃣ CONTACT GAP SCORE (max 35 pts)
-    if row["years_since_contact"] >= 2:
-        score += 35
-        drivers.append(f"{row['years_since_contact']} years without contact")
-    elif row["years_since_contact"] >= 1:
-        score += 20
-        drivers.append("Commercial inactivity detected")
-
-    # 3️⃣ SYSTEM SIZE SCORE (max 15 pts)
-    if row["system_kw"] >= 6:
-        score += 15
-        drivers.append("High capacity system")
-
-    # 4️⃣ COUNTRY CONTEXT (simple placeholder logic)
-    if row["location_type"] == "coastal":
-        score += 15
-        drivers.append("High energy pressure region")
-
-    # Clamp
-    if score > 100:
-        score = 100
-
-    # --- CLOSE PROBABILITY ---
-    if score >= 72:
-        close_probability = 0.25
-    elif score >= 60:
-        close_probability = 0.15
-    else:
-        close_probability = 0.05
-
-    # --- ESTIMATED INVESTMENT ---
-    estimated_upgrade_kw = row["system_kw"] * 0.25
-    estimated_battery_kwh = row["system_kw"] * 1.2
-
-    upgrade_price_per_kw = 1500
-    battery_price_per_kwh = 900
-
-    estimated_investment = round(
-        (estimated_upgrade_kw * upgrade_price_per_kw) +
-        (estimated_battery_kwh * battery_price_per_kwh),
-        2
-    )
-
-    expected_value = round(estimated_investment * close_probability, 2)
-
-    return pd.Series([
-        score,
-        drivers[:3],
-        close_probability,
-        estimated_investment,
-        expected_value
-    ])
-
-df[[
-    "score",
-    "drivers",
-    "close_probability",
-    "estimated_investment",
-    "expected_value"
-]] = df.apply(score_row, axis=1)
-
-# --- ENDPOINTS ---
-
+# =========================
+# TOP 20 OPPORTUNITIES
+# =========================
 @app.get("/top20-simple")
 def top20_simple():
-    result = df.sort_values(by="score", ascending=False).head(20)
-    return result[[
-        "client_name",
-        "score",
-        "drivers",
-        "estimated_investment",
-        "expected_value"
-    ]].to_dict(orient="records")
+    response = (
+        supabase
+        .table("clients")
+        .select("*")
+        .order("score", desc=True)
+        .limit(20)
+        .execute()
+    )
+
+    return response.data
 
 
+# =========================
+# EXECUTIVE SUMMARY
+# =========================
 @app.get("/executive-summary")
 def executive_summary():
-    total_systems = len(df)
-    total_potential = round(df["estimated_investment"].sum(), 2)
-    total_expected = round(df["expected_value"].sum(), 2)
+    response = supabase.table("clients").select("*").execute()
+    data = response.data
 
-    high_priority = len(df[df["score"] >= 72])
+    total_systems = len(data)
+    total_potential = sum((c.get("estimated_investment") or 0) for c in data)
+    total_expected = sum((c.get("expected_value") or 0) for c in data)
+    total_closed = sum(
+        (c.get("closed_value") or 0)
+        for c in data
+        if c.get("status") == "Closed"
+    )
 
     return {
-        "total_systems": int(total_systems),
-        "activation_candidates": int(high_priority),
-        "total_potential_revenue": total_potential,
-        "total_expected_value": total_expected
+        "total_systems": total_systems,
+        "total_potential_revenue": round(total_potential, 2),
+        "total_expected_value": round(total_expected, 2),
+        "total_closed_revenue": round(total_closed, 2),
     }
+
+
+# =========================
+# UPDATE CLIENT STATUS
+# =========================
+class StatusUpdate(BaseModel):
+    status: str
+    closed_value: float | None = None
+
+
+@app.post("/api/client/{client_id}/status")
+def update_status(client_id: str, payload: StatusUpdate):
+
+    update_data = {
+        "status": payload.status
+    }
+
+    if payload.status == "Closed" and payload.closed_value is not None:
+        update_data["closed_value"] = payload.closed_value
+
+    supabase.table("clients") \
+        .update(update_data) \
+        .eq("id", client_id) \
+        .execute()
+
+    return {"message": "Status updated successfully"}
