@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
+from datetime import datetime
 
 app = FastAPI()
 
@@ -15,108 +16,112 @@ app.add_middleware(
 
 CURRENT_YEAR = 2026
 
-# --- Load data ---
+# --- Load CSV ---
 df = pd.read_csv("demo_clients.csv")
 
+# --- Derived fields ---
 df["years_since_install"] = CURRENT_YEAR - df["install_year"]
 df["years_since_contact"] = CURRENT_YEAR - df["last_contact_year"]
 
-# --- SCORING LOGIC ---
-
+# --- SCORING ENGINE V1 ---
 def score_row(row):
-    battery_score = 0
-    upgrade_score = 0
-    maintenance_score = 0
+    score = 0
+    drivers = []
 
-    # Battery
-    if not row["has_battery"]:
-        battery_score += 20
-    if row["years_since_install"] >= 5:
-        battery_score += 15
+    # 1️⃣ AGE SCORE (max 35 pts)
+    if 2 <= row["years_since_install"] <= 5:
+        score += 35
+        drivers.append("Optimal upgrade age window")
+    elif row["years_since_install"] > 5:
+        score += 20
+        drivers.append("System mature for expansion")
+
+    # 2️⃣ CONTACT GAP SCORE (max 35 pts)
+    if row["years_since_contact"] >= 2:
+        score += 35
+        drivers.append(f"{row['years_since_contact']} years without contact")
+    elif row["years_since_contact"] >= 1:
+        score += 20
+        drivers.append("Commercial inactivity detected")
+
+    # 3️⃣ SYSTEM SIZE SCORE (max 15 pts)
+    if row["system_kw"] >= 6:
+        score += 15
+        drivers.append("High capacity system")
+
+    # 4️⃣ COUNTRY CONTEXT (simple placeholder logic)
     if row["location_type"] == "coastal":
-        battery_score += 20
+        score += 15
+        drivers.append("High energy pressure region")
 
-    # Upgrade
-    if row["system_kw"] < 6:
-        upgrade_score += 20
-    if row["years_since_install"] >= 3:
-        upgrade_score += 20
+    # Clamp
+    if score > 100:
+        score = 100
 
-    # Maintenance
-    if row["years_since_contact"] >= 4:
-        maintenance_score += 25
-    if row["client_type"] == "commercial":
-        maintenance_score += 20
-
-    total_score = max(battery_score, upgrade_score, maintenance_score)
-
-    if total_score == battery_score:
-        main_opportunity = "Battery"
-        estimated_value = 8000
-        close_probability = 0.35 if total_score >= 60 else 0.25
-        effort_score = 4 if total_score >= 60 else 3
-
-    elif total_score == upgrade_score:
-        main_opportunity = "Upgrade"
-        estimated_value = 6000
-        close_probability = 0.30
-        effort_score = 3
-
+    # --- CLOSE PROBABILITY ---
+    if score >= 72:
+        close_probability = 0.25
+    elif score >= 60:
+        close_probability = 0.15
     else:
-        main_opportunity = "Maintenance"
-        estimated_value = 900
         close_probability = 0.05
-        effort_score = 5
 
-    expected_value = round(estimated_value * close_probability, 2)
-    priority_score = round(expected_value / effort_score)
+    # --- ESTIMATED INVESTMENT ---
+    estimated_upgrade_kw = row["system_kw"] * 0.25
+    estimated_battery_kwh = row["system_kw"] * 1.2
+
+    upgrade_price_per_kw = 1500
+    battery_price_per_kwh = 900
+
+    estimated_investment = round(
+        (estimated_upgrade_kw * upgrade_price_per_kw) +
+        (estimated_battery_kwh * battery_price_per_kwh),
+        2
+    )
+
+    expected_value = round(estimated_investment * close_probability, 2)
 
     return pd.Series([
-        main_opportunity,
-        total_score,
-        estimated_value,
+        score,
+        drivers[:3],
         close_probability,
-        expected_value,
-        effort_score,
-        priority_score
+        estimated_investment,
+        expected_value
     ])
 
 df[[
-    "main_opportunity",
-    "total_score",
-    "estimated_value",
+    "score",
+    "drivers",
     "close_probability",
-    "expected_value",
-    "effort_score",
-    "priority_score"
+    "estimated_investment",
+    "expected_value"
 ]] = df.apply(score_row, axis=1)
 
 # --- ENDPOINTS ---
 
 @app.get("/top20-simple")
 def top20_simple():
-    result = df.sort_values(by="priority_score", ascending=False).head(20)
+    result = df.sort_values(by="score", ascending=False).head(20)
     return result[[
         "client_name",
-        "main_opportunity",
-        "total_score",
-        "expected_value",
-        "priority_score"
+        "score",
+        "drivers",
+        "estimated_investment",
+        "expected_value"
     ]].to_dict(orient="records")
 
 
 @app.get("/executive-summary")
 def executive_summary():
-    total_clients = len(df)
-    total_pipeline_value = round(df["estimated_value"].sum(), 2)
-    total_expected_value = round(df["expected_value"].sum(), 2)
-    high_priority_clients = len(df[df["priority_score"] >= 600])
-    top_opportunity_type = df["main_opportunity"].value_counts().idxmax()
+    total_systems = len(df)
+    total_potential = round(df["estimated_investment"].sum(), 2)
+    total_expected = round(df["expected_value"].sum(), 2)
+
+    high_priority = len(df[df["score"] >= 72])
 
     return {
-        "total_clients": int(total_clients),
-        "total_pipeline_value": total_pipeline_value,
-        "total_expected_value": total_expected_value,
-        "high_priority_clients": int(high_priority_clients),
-        "top_opportunity_type": top_opportunity_type
+        "total_systems": int(total_systems),
+        "activation_candidates": int(high_priority),
+        "total_potential_revenue": total_potential,
+        "total_expected_value": total_expected
     }
