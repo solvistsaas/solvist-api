@@ -1,4 +1,5 @@
 fastapi
 uvicorn
-pandas
 supabase
+slowapi
+python-dotenv
