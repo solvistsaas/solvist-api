@@ -232,7 +232,7 @@ def create_installation(request: Request, payload: InstallationCreate, tenant: T
     data = payload.dict()
     data["location_type"] = payload.location_type.value
     data["company_id"] = tenant.company_id
-        res = db.table("installations").insert(data).execute()
+    res = db.table("installations").insert(data).execute()
     return res.data[0]
 
 
