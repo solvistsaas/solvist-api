@@ -608,5 +608,3 @@ def generate_activation_pdf(request: Request, installation_id: str, tenant: Tena
     pdf_bytes = bytes(pdf.output())
     return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=oportunidad_{inst.get('client_name')}.pdf"})
 
-    res = db.table("installations").insert(data).execute()
-    return res.data[0]
