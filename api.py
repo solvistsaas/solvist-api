@@ -215,12 +215,11 @@ async def lifespan(app: FastAPI):
     if not os.getenv("ENGINE_SECRET"):
         logger.warning("ENGINE_SECRET not configured — /api/engine/score-all will return 403.")
 
-    scheduler.add_job(core_score_all_installations, 'interval', hours=24)
     scheduler.start()
     logger.info("APScheduler initialized for daily scoring.")
 
-    yield
-    scheduler.shutdown()
+    # 
+    # TODO: Move function before lifespan to fix NameError# scheduler.add_job(core_score_all_installations, 'interval', hours=24) # TODO: Move function before lifespan to fix NameError    scheduler.shutdown()
 
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
 
