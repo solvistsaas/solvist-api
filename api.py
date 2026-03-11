@@ -817,7 +817,7 @@ async def import_installations(request: Request, tenant: Tenant, file: UploadFil
         # But for large batches calling directly might timeout the request, 
         # so we schedule it to run immediately via APScheduler or just call it if we don't worry about timeouts (V1).
         # We will call it directly.
-        core_score_all_installations()
+                    scheduler.add_job(core_score_all_installations, 'date')
         
         return {
             "installations_imported": len(insert_payload),
