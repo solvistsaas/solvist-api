@@ -28,7 +28,7 @@ from urllib.parse import urlparse, parse_qs
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import URLError, HTTPError
 
-from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, File, UploadFile, Form
+from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, File, UploadFile, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -1031,7 +1031,11 @@ def _read_platform_scan_totals() -> Dict[str, float]:
 
 @app.post("/api/installations")
 @limiter.limit("20/minute")
-def create_installation(request: Request, payload: InstallationCreate, tenant: Tenant):
+def create_installation(
+    request: Request,
+    payload: Annotated[InstallationCreate, Body(...)],
+    tenant: Tenant,
+):
     if payload.installation_year < 2000:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Installation year must be >= 2000.")
         
