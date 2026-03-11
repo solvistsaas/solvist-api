@@ -20,6 +20,7 @@ import logging
 import secrets
 import re
 import json
+import csv
 from textwrap import dedent
 from datetime import datetime, timezone, date, timedelta
 from typing import Annotated, Dict, List, Literal, Optional
@@ -172,6 +173,147 @@ async def get_tenant(
 
 Tenant = Annotated[TenantContext, Depends(get_tenant)]
 
+
+def _normalize_secret(value: Optional[str]) -> str:
+    return (value or "").strip().strip('"').strip("'").strip()
+
+
+def _mask_value(value: str, head: int = 6, tail: int = 4) -> str:
+    if not value:
+        return ""
+    if len(value) <= head + tail:
+        return "*" * len(value)
+    return f"{value[:head]}...{value[-tail:]}"
+
+
+def parse_bearer_token(auth_header: Optional[str]) -> tuple[str, str, str]:
+    auth = (auth_header or "").strip()
+    if not auth:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    normalized = auth
+    lower = normalized.lower()
+
+    if lower.startswith("bearerbearer"):
+        normalized = f"Bearer {normalized[len('bearerbearer'):].lstrip(' :')}"
+        lower = normalized.lower()
+    elif lower.startswith("bearer:"):
+        normalized = f"Bearer {normalized.split(':', 1)[1].strip()}"
+        lower = normalized.lower()
+
+    parts = normalized.split(None, 1)
+    if len(parts) < 2:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    scheme = parts[0].rstrip(":")
+    token = parts[1].strip()
+    if scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    while token.lower().startswith("bearer "):
+        token = token[7:].strip()
+
+    token = token.strip().strip('"').strip("'").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    masked_header = normalized.replace(parts[1], _mask_value(token), 1)
+    return token, scheme, masked_header
+
+
+def _extract_authorization_bearer(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = None,
+) -> str:
+    auth_header = request.headers.get("Authorization")
+    if not auth_header and credentials and credentials.scheme and credentials.credentials:
+        auth_header = f"{credentials.scheme} {credentials.credentials}"
+
+    token, scheme, masked_header = parse_bearer_token(auth_header)
+    engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
+    equals_engine = bool(engine_secret) and secrets.compare_digest(token, engine_secret)
+
+    # Temporary auth diagnostics for production debugging.
+    logger.info("AUTH HEADER: %s", masked_header)
+    logger.info("PARSED SCHEME: %s", scheme)
+    logger.info("TOKEN RECEIVED: %s", _mask_value(token))
+    logger.info("ENGINE_SECRET LENGTH: %s", len(engine_secret))
+    logger.info("TOKEN LENGTH: %s", len(token))
+    logger.info("TOKEN_EQUALS_ENGINE_SECRET: %s", equals_engine)
+    return token
+
+
+async def get_import_tenant(
+    request: Request,
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
+) -> TenantContext:
+    token = _extract_authorization_bearer(request, credentials)
+    engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
+
+    if engine_secret and secrets.compare_digest(token, engine_secret):
+        company_id = (request.headers.get("X-Company-Id") or "").strip()
+        if not company_id:
+            company_res = admin_client.table("companies").select("id").limit(1).execute()
+            if not company_res.data:
+                raise HTTPException(status_code=403, detail="No company available for engine import.")
+            company_id = company_res.data[0]["id"]
+
+        try:
+            comp_res = (
+                admin_client.table("companies")
+                .select("installation_limit")
+                .eq("id", company_id)
+                .single()
+                .execute()
+            )
+            max_inst = comp_res.data.get("installation_limit") or 500
+        except Exception:
+            max_inst = 500
+
+        tenant = TenantContext(
+            user_id="engine_service",
+            company_id=company_id,
+            jwt="",
+            installation_limit=max_inst,
+        )
+        request.state.tenant = tenant
+        return tenant
+
+    try:
+        auth_response = admin_client.auth.get_user(token)
+        user_id = auth_response.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    db = scoped_client(token)
+    try:
+        res_user = db.table("users").select("company_id").eq("id", user_id).single().execute()
+        company_id = res_user.data.get("company_id")
+    except Exception:
+        raise HTTPException(status_code=403, detail="User not registered.")
+
+    if not company_id:
+        raise HTTPException(status_code=403, detail="User has no company.")
+
+    try:
+        res_comp = (
+            admin_client.table("companies")
+            .select("installation_limit")
+            .eq("id", company_id)
+            .single()
+            .execute()
+        )
+        max_inst = res_comp.data.get("installation_limit") or 500
+    except Exception:
+        max_inst = 500
+
+    tenant = TenantContext(user_id=user_id, company_id=company_id, jwt=token, installation_limit=max_inst)
+    request.state.tenant = tenant
+    return tenant
+
+
+ImportTenant = Annotated[TenantContext, Depends(get_import_tenant)]
+
 class LocationTypeEnum(str, Enum):
     residential = "residential"
     industrial = "industrial"
@@ -315,7 +457,7 @@ limiter = Limiter(key_func=_tenant_key, default_limits=["60/minute"])
 # SCORING ENGINE
 # ------------------------------------
 
-ENGINE_SECRET = os.getenv("ENGINE_SECRET")
+ENGINE_SECRET = _normalize_secret(os.getenv("ENGINE_SECRET"))
 
 def core_score_all_installations():
     start_time = datetime.now(timezone.utc)
@@ -574,8 +716,8 @@ def score_all_installations(request: Request):
     """
     Monthly Serverless Job endpoint. Can be triggered manually.
     """
-    provided = request.headers.get("X-ENGINE-SECRET")
-    if not provided or not secrets.compare_digest(provided, ENGINE_SECRET):
+    provided = _normalize_secret(request.headers.get("X-ENGINE-SECRET"))
+    if not provided or not ENGINE_SECRET or not secrets.compare_digest(provided, ENGINE_SECRET):
         logger.warning(f"ENGINE: Authentication failed from IP {get_remote_address(request)}")
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -782,8 +924,15 @@ def _parse_installations_from_dataframe(
     alias_prefix: str,
     required_columns_error_message: Optional[str] = None,
 ) -> List[Dict]:
+    if df is None or df.empty:
+        return []
+
+    df = df.dropna(how="all")
+    if df.empty:
+        return []
+
     # Normalize column names
-    columns_lower = {col: col.lower().strip() for col in df.columns}
+    columns_lower = {col: str(col).lower().strip() for col in df.columns}
     df.rename(columns=columns_lower, inplace=True)
 
     kwp_aliases = ["system_size_kwp", "kwp", "system_size", "size_kwp", "installed_kwp", "power_kwp"]
@@ -859,7 +1008,39 @@ def _parse_installations_from_csv_bytes(
     alias_prefix: str,
     required_columns_error_message: Optional[str] = None,
 ) -> List[Dict]:
-    df = pd.read_csv(io.BytesIO(csv_bytes))
+    if not csv_bytes:
+        raise HTTPException(status_code=400, detail="CSV file is empty.")
+
+    encodings = ("utf-8-sig", "utf-8", "latin-1")
+    parse_error: Optional[Exception] = None
+    df: Optional[pd.DataFrame] = None
+
+    for encoding in encodings:
+        try:
+            text = csv_bytes.decode(encoding)
+        except UnicodeDecodeError as decode_error:
+            parse_error = decode_error
+            continue
+
+        sample = text[:4096]
+        delimiter = ","
+        try:
+            sniffed = csv.Sniffer().sniff(sample, delimiters=",;|\t")
+            delimiter = sniffed.delimiter
+        except Exception:
+            if sample.count(";") > sample.count(","):
+                delimiter = ";"
+
+        try:
+            df = pd.read_csv(io.StringIO(text), sep=delimiter, skipinitialspace=True, engine="python")
+            break
+        except Exception as read_error:
+            parse_error = read_error
+            continue
+
+    if df is None:
+        raise HTTPException(status_code=400, detail=f"Error parsing CSV file: {parse_error}")
+
     return _parse_installations_from_dataframe(
         df,
         company_id=company_id,
@@ -1059,11 +1240,12 @@ def create_installation(
 # ─── Endpoints: Import Installations V1 ──────────────────────────────────────────
 @app.post("/api/import/installations")
 @limiter.limit("5/minute")
-async def import_installations(request: Request, tenant: Tenant, file: UploadFile = File(...)):
+async def import_installations(request: Request, tenant: ImportTenant, file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith('.csv'):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
         
-    db = scoped_client(tenant.jwt)
+    db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
+    logger.info("IMPORT: Received CSV upload filename=%s company_id=%s", file.filename, tenant.company_id)
     
     try:
         content = await file.read()
@@ -1072,6 +1254,7 @@ async def import_installations(request: Request, tenant: Tenant, file: UploadFil
             company_id=tenant.company_id,
             alias_prefix="PV",
         )
+        logger.info("IMPORT: Parsed %s valid installations for company_id=%s", len(insert_payload), tenant.company_id)
         for row in insert_payload:
             row.pop("client_alias", None)
             row.pop("id", None)
@@ -1089,6 +1272,7 @@ async def import_installations(request: Request, tenant: Tenant, file: UploadFil
         # Insert
         for chunk in [insert_payload[i:i + 100] for i in range(0, len(insert_payload), 100)]:
             db.table("installations").insert(chunk).execute()
+        logger.info("IMPORT: Inserted %s installations for company_id=%s", len(insert_payload), tenant.company_id)
             
         # Trigger engine job automatically after importing (non-blocking)
         scheduler.add_job(core_score_all_installations, 'date')
@@ -1470,16 +1654,6 @@ def insights(request: Request, tenant: Tenant):
     ]
 
 
-# ─── Endpoints: Execution Tracking V1 ──────────────────────────────────────────
-class OpportunityTypeEnum(str, Enum):
-    battery = "battery"
-    maintenance = "maintenance"
-    expansion = "expansion"
-    ev = "ev"
-    industrial = "industrial"
-
-# Moved above
-
 @app.post("/api/tracking")
 @limiter.limit("30/minute")
 def add_tracking(request: Request, payload: TrackingUpdate, tenant: Tenant):
@@ -1500,17 +1674,6 @@ def add_tracking(request: Request, payload: TrackingUpdate, tenant: Tenant):
     res = db.table("execution_tracking").insert(data).execute()
     return {"message": "Tracking saved", "id": res.data[0]["id"]}
 
-
-# ─── Endpoints: Scoring Engine Job ─────────────────────────────────────────────
-
-# ENGINE_SECRET loaded from environment — validated at startup via lifespan (see above)
-ENGINE_SECRET = os.getenv("ENGINE_SECRET")
-
-def core_score_all_installations():
-    start_time = datetime.now(timezone.utc)
-    logger.info("ENGINE: Starting full opportunity scoring run.")
-
-    # Removed moved engine block
 
 # ─── Endpoints: Minimalist PDF Generation V1 ───────────────────────────────────
 @app.get("/api/activation/{installation_id}/pdf")
@@ -1974,6 +2137,26 @@ def pipeline(request: Request, tenant: Tenant):
         slug = c.get("opportunity_type")
         c["opportunity_type_display"] = opportunity_display_es(slug)
         
+    return data
+
+
+@app.get("/api/opportunities")
+@limiter.limit("30/minute")
+def opportunities(request: Request, tenant: Tenant, limit: int = 100):
+    db = scoped_client(tenant.jwt)
+    safe_limit = max(1, min(limit, 500))
+    res = (
+        db.table("clients")
+        .select("id, client_alias, opportunity_type, expected_value, score, priority_score, status")
+        .eq("company_id", tenant.company_id)
+        .gte("score", 40)
+        .order("priority_score", desc=True)
+        .limit(safe_limit)
+        .execute()
+    )
+    data = res.data or []
+    for item in data:
+        item["opportunity_type_display"] = opportunity_display_es(item.get("opportunity_type"))
     return data
 
 
@@ -2475,6 +2658,63 @@ def health_check(request: Request):
         "status": "ok",
         "service": "solvist-api",
         "environment": ENVIRONMENT
+    }
+
+
+@app.get("/health/pipeline")
+@limiter.limit("30/minute")
+def health_pipeline(request: Request):
+    database_status = "ok"
+    database_error = ""
+    try:
+        admin_client.table("companies").select("id").limit(1).execute()
+    except Exception as exc:
+        database_status = "error"
+        database_error = str(exc)
+
+    auth_status = "ok" if _normalize_secret(os.getenv("ENGINE_SECRET")) else "error"
+    scoring_status = "ok" if callable(core_score_all_installations) else "error"
+    scheduler_status = "running" if getattr(scheduler, "running", False) else "stopped"
+
+    payload = {
+        "database": database_status,
+        "auth": auth_status,
+        "scoring_engine": scoring_status,
+        "scheduler": scheduler_status,
+    }
+    if database_error:
+        payload["database_error"] = database_error
+    return payload
+
+
+@app.get("/debug/auth")
+@limiter.limit("30/minute")
+def debug_auth(request: Request):
+    header_raw = (request.headers.get("Authorization") or "").strip()
+    engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
+
+    try:
+        token, scheme, masked_header = parse_bearer_token(header_raw)
+        token_masked = _mask_value(token)
+        token_length = len(token)
+        token_equal_engine_secret = bool(engine_secret) and secrets.compare_digest(token, engine_secret)
+        parse_error = None
+    except HTTPException as exc:
+        scheme = None
+        masked_header = header_raw[:24] + ("..." if len(header_raw) > 24 else "")
+        token_masked = None
+        token_length = 0
+        token_equal_engine_secret = False
+        parse_error = exc.detail
+
+    return {
+        "header_received": masked_header,
+        "token_parsed": token_masked,
+        "engine_secret_length": len(engine_secret),
+        "parsed_scheme": scheme,
+        "token_length": token_length,
+        "token_equal_engine_secret": token_equal_engine_secret,
+        "parse_error": parse_error,
     }
 
 
