@@ -217,15 +217,33 @@ async def lifespan(app: FastAPI):
 
     scheduler.start()
     logger.info("APScheduler initialized for daily scoring.")
-
-    # 
-    # TODO: Move function before lifespan to fix NameError# scheduler.add_job(core_score_all_installations, 'interval', hours=24) # TODO: Move function before lifespan to fix NameError    scheduler.shutdown()
+        
+#     # Schedule daily scoring job
+    # scheduler.add_job(
+        # core_score_all_installations,
+        # 'interval',
+        # hours=24
+    # )
+    
+    yield
+    
+    # Shutdown
+    scheduler.shutdown()
 
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
 
 # ─── Auth Dependency ───────────────────────────────────────────────────────────
 bearer_scheme = HTTPBearer(auto_error=False)
 
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://solvist-frontend.vercel.app", "https://solvist-api-1.onrender.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class TenantContext(BaseModel):
     user_id: str
