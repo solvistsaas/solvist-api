@@ -121,75 +121,6 @@ COUNTRY_TO_CURRENCY_FALLBACK: Dict[str, str] = {
 }
 
 
-def opportunity_display_es(opportunity_slug: Optional[str]) -> str:
-    if not opportunity_slug:
-        return "Oportunidad Comercial"
-    if opportunity_slug in OPPORTUNITY_DISPLAY_ES:
-        return OPPORTUNITY_DISPLAY_ES[opportunity_slug]
-    return opportunity_slug.replace("_", " ").title()
-
-
-def pipeline_status_display_es(status_value: Optional[str]) -> str:
-    if not status_value:
-        return "Sin estado"
-    return PIPELINE_STATUS_ES.get(status_value, status_value)
-
-
-def build_sales_email_draft(client: Dict) -> Dict[str, str]:
-    alias = client.get("client_alias") or "Cliente"
-    opportunity_slug = client.get("opportunity_type")
-    opportunity_name = opportunity_display_es(opportunity_slug)
-    expected_value = float(client.get("expected_value") or 0)
-    estimated_savings = float(client.get("estimated_battery_savings") or 0)
-    payback_years = client.get("battery_payback_years")
-    sales_script_short = (client.get("sales_script_short") or "").strip()
-
-    savings_line = ""
-    if estimated_savings > 0:
-        savings_line = f"Hemos detectado un ahorro potencial de aproximadamente {round(estimated_savings):,.0f} EUR al año."
-    else:
-        savings_line = "Hemos detectado una oportunidad de mejora con impacto económico positivo para su instalación."
-
-    payback_line = ""
-    if payback_years:
-        payback_line = f"La amortización estimada se sitúa en torno a {payback_years} años."
-
-    script_line = ""
-    if sales_script_short:
-        script_line = "Nuestro análisis indica que este sistema es un buen candidato para activar esta mejora en el corto plazo."
-
-    subject = f"Propuesta de mejora energética para {alias}: {opportunity_name}"
-    body = dedent(
-        f"""\
-        Hola,
-
-        Soy del equipo técnico-comercial de su instalador solar.
-
-        Durante una revisión reciente de su sistema, detectamos una oportunidad prioritaria: {opportunity_name}.
-        {savings_line}
-        {payback_line}
-        {script_line}
-
-        Valor potencial estimado de esta oportunidad: {round(expected_value):,.0f} EUR.
-
-        Si le encaja, podemos enviarle una propuesta personalizada y resolver cualquier duda en una llamada de 10 minutos.
-
-        Quedo atento para coordinarlo.
-        """
-    ).strip()
-
-    return {
-        "email_subject": subject,
-        "email_body": body,
-    }
-
-
-def scoped_client(jwt: str) -> Client:
-    """Creates a per-request client with the user's JWT (activates RLS auth.uid())."""
-    client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-    client.postgrest.auth(jwt)
-    return client
-
 # ─── Models & Enums ───────────────────────────────────────────────────────────
 class TenantContext(BaseModel):
     user_id: str
@@ -290,6 +221,87 @@ class SalesActionTypeEnum(str, Enum):
 class SalesActionPayload(BaseModel):
     action: SalesActionTypeEnum
     note: str = ""
+
+# Ensure models are fully resolved before FastAPI builds OpenAPI.
+for _model in (
+    TenantContext,
+    InstallationCreate,
+    TrackingUpdate,
+    StatusUpdatePayload,
+    NotesUpdatePayload,
+    SalesActionPayload,
+):
+    _model.model_rebuild()
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+def opportunity_display_es(opportunity_slug: Optional[str]) -> str:
+    if not opportunity_slug:
+        return "Oportunidad Comercial"
+    if opportunity_slug in OPPORTUNITY_DISPLAY_ES:
+        return OPPORTUNITY_DISPLAY_ES[opportunity_slug]
+    return opportunity_slug.replace("_", " ").title()
+
+
+def pipeline_status_display_es(status_value: Optional[str]) -> str:
+    if not status_value:
+        return "Sin estado"
+    return PIPELINE_STATUS_ES.get(status_value, status_value)
+
+
+def build_sales_email_draft(client: Dict) -> Dict[str, str]:
+    alias = client.get("client_alias") or "Cliente"
+    opportunity_slug = client.get("opportunity_type")
+    opportunity_name = opportunity_display_es(opportunity_slug)
+    expected_value = float(client.get("expected_value") or 0)
+    estimated_savings = float(client.get("estimated_battery_savings") or 0)
+    payback_years = client.get("battery_payback_years")
+    sales_script_short = (client.get("sales_script_short") or "").strip()
+
+    savings_line = ""
+    if estimated_savings > 0:
+        savings_line = f"Hemos detectado un ahorro potencial de aproximadamente {round(estimated_savings):,.0f} EUR al año."
+    else:
+        savings_line = "Hemos detectado una oportunidad de mejora con impacto económico positivo para su instalación."
+
+    payback_line = ""
+    if payback_years:
+        payback_line = f"La amortización estimada se sitúa en torno a {payback_years} años."
+
+    script_line = ""
+    if sales_script_short:
+        script_line = "Nuestro análisis indica que este sistema es un buen candidato para activar esta mejora en el corto plazo."
+
+    subject = f"Propuesta de mejora energética para {alias}: {opportunity_name}"
+    body = dedent(
+        f"""\
+        Hola,
+
+        Soy del equipo técnico-comercial de su instalador solar.
+
+        Durante una revisión reciente de su sistema, detectamos una oportunidad prioritaria: {opportunity_name}.
+        {savings_line}
+        {payback_line}
+        {script_line}
+
+        Valor potencial estimado de esta oportunidad: {round(expected_value):,.0f} EUR.
+
+        Si le encaja, podemos enviarle una propuesta personalizada y resolver cualquier duda en una llamada de 10 minutos.
+
+        Quedo atento para coordinarlo.
+        """
+    ).strip()
+
+    return {
+        "email_subject": subject,
+        "email_body": body,
+    }
+
+
+def scoped_client(jwt: str) -> Client:
+    """Creates a per-request client with the user's JWT (activates RLS auth.uid())."""
+    client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    client.postgrest.auth(jwt)
+    return client
 
 # ─── App & Rate Limiter ────────────────────────────────────────────────────────
 def _tenant_key(request: Request) -> str:
@@ -544,6 +556,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, lambda req, exc: Response("Rate limit exceeded", status_code=429))
+app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.post("/api/engine/score-all")
 @limiter.limit("5/minute")
 def score_all_installations(request: Request):
@@ -558,24 +582,6 @@ def score_all_installations(request: Request):
     # Trigger scoring job immediately via APScheduler (non-blocking)
     scheduler.add_job(core_score_all_installations, "date")
     return {"message": "Scoring triggered"}
-
-# FastAPI initialized above
-
-# Moved above
-
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://solvist-frontend.vercel.app", "https://solvist-api-1.onrender.com"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Moved above
-
-
 
 @app.get("/api/portfolio-opportunity-value")
 @limiter.limit("20/minute")
@@ -657,21 +663,6 @@ def get_recontact_opportunities(request: Request, tenant: Tenant):
         "clients_to_recontact": count,
         "estimated_revenue": total_rev
     }
-
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, lambda req, exc: Response("Rate limit exceeded", status_code=429))
-app.add_middleware(SlowAPIMiddleware)
-
-# Correct CORS for production domains
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=CORS_ORIGIN_REGEX,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 @app.middleware("http")
 async def audit_middleware(request: Request, call_next):
