@@ -20,7 +20,7 @@ services:
         value: "https://solvist.io,https://app.solvist.io,https://solvist-frontend.vercel.app"
       - key: CORS_ORIGIN_REGEX
         value: "https://.*\\.vercel\\.app"
-            - key: SUPABASE_ANON_KEY
+                - key: SUPABASE_ANON_KEY
       sync: false
     - key: ENGINE_SECRET
       sync: false
