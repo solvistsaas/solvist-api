@@ -200,6 +200,9 @@ class TenantContext(BaseModel):
     class Config:
         frozen = True
 
+# ─── Auth Dependency ───────────────────────────────────────────────────────────
+bearer_scheme = HTTPBearer(auto_error=False)
+
 async def get_tenant(
     request: Request,
     credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
@@ -558,8 +561,7 @@ def score_all_installations(request: Request):
 
 # FastAPI initialized above
 
-# ─── Auth Dependency ───────────────────────────────────────────────────────────
-bearer_scheme = HTTPBearer(auto_error=False)
+# Moved above
 
 
 # Add CORS middleware
