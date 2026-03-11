@@ -224,6 +224,60 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
 
+# ─── Auth Dependency ───────────────────────────────────────────────────────────
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class TenantContext(BaseModel):
+    user_id: str
+    company_id: str
+    jwt: str
+    installation_limit: int
+
+    class Config:
+        frozen = True
+
+
+async def get_tenant(
+    request: Request,
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
+) -> TenantContext:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+
+    token = credentials.credentials
+    try:
+        auth_response = admin_client.auth.get_user(token)
+        user_id = auth_response.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+
+    db = scoped_client(token)
+    try:
+        res_user = db.table("users").select("company_id").eq("id", user_id).single().execute()
+        company_id = res_user.data.get("company_id")
+    except Exception:
+        raise HTTPException(status_code=403, detail="User not registered.")
+
+    if not company_id:
+        raise HTTPException(status_code=403, detail="User has no company.")
+
+    # Fetch installation limit from companies (RLS applies or fallback to admin query if needed)
+    try:
+        # Service role to fetch plan limits (companies RLS might be strict)
+        res_comp = admin_client.table("companies").select("installation_limit").eq("id", company_id).single().execute()
+        max_inst = res_comp.data.get("installation_limit") or 500
+    except Exception:
+        max_inst = 500
+
+    tenant = TenantContext(user_id=user_id, company_id=company_id, jwt=token, installation_limit=max_inst)
+    request.state.tenant = tenant
+    return tenant
+
+
+Tenant = Annotated[TenantContext, Depends(get_tenant)]
+
+
 
 @app.get("/api/portfolio-opportunity-value")
 @limiter.limit("20/minute")
@@ -348,58 +402,6 @@ async def audit_middleware(request: Request, call_next):
     return response
 
 
-# ─── Auth Dependency ───────────────────────────────────────────────────────────
-bearer_scheme = HTTPBearer(auto_error=False)
-
-
-class TenantContext(BaseModel):
-    user_id: str
-    company_id: str
-    jwt: str
-    installation_limit: int
-
-    class Config:
-        frozen = True
-
-
-async def get_tenant(
-    request: Request,
-    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
-) -> TenantContext:
-    if not credentials:
-        raise HTTPException(status_code=401, detail="Missing Authorization header.")
-
-    token = credentials.credentials
-    try:
-        auth_response = admin_client.auth.get_user(token)
-        user_id = auth_response.user.id
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token.")
-
-    db = scoped_client(token)
-    try:
-        res_user = db.table("users").select("company_id").eq("id", user_id).single().execute()
-        company_id = res_user.data.get("company_id")
-    except Exception:
-        raise HTTPException(status_code=403, detail="User not registered.")
-
-    if not company_id:
-        raise HTTPException(status_code=403, detail="User has no company.")
-
-    # Fetch installation limit from companies (RLS applies or fallback to admin query if needed)
-    try:
-        # Service role to fetch plan limits (companies RLS might be strict)
-        res_comp = admin_client.table("companies").select("installation_limit").eq("id", company_id).single().execute()
-        max_inst = res_comp.data.get("installation_limit") or 500
-    except Exception:
-        max_inst = 500
-
-    tenant = TenantContext(user_id=user_id, company_id=company_id, jwt=token, installation_limit=max_inst)
-    request.state.tenant = tenant
-    return tenant
-
-
-Tenant = Annotated[TenantContext, Depends(get_tenant)]
 
 
 # ─── Endpoints: Infrastructure ─────────────────────────────────────────────────
