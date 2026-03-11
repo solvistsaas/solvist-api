@@ -419,21 +419,6 @@ def core_score_all_installations():
         "runtime_seconds": round(runtime_seconds, 2)
     }
 
-@app.post("/api/engine/score-all")
-@limiter.limit("5/minute")
-def score_all_installations(request: Request):
-    """
-    Monthly Serverless Job endpoint. Can be triggered manually.
-    """
-    provided = request.headers.get("X-ENGINE-SECRET")
-    if not provided or not secrets.compare_digest(provided, ENGINE_SECRET):
-        logger.warning(f"ENGINE: Authentication failed from IP {get_remote_address(request)}")
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    # Trigger scoring job immediately via APScheduler (non-blocking)
-    scheduler.add_job(core_score_all_installations, "date")
-    return {"message": "Scoring triggered"}
-
 # ─── Lifespan: Startup / Shutdown ─────────────────────────────────────────────
 from contextlib import asynccontextmanager
 
@@ -458,6 +443,23 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
+
+@app.post("/api/engine/score-all")
+@limiter.limit("5/minute")
+def score_all_installations(request: Request):
+    """
+    Monthly Serverless Job endpoint. Can be triggered manually.
+    """
+    provided = request.headers.get("X-ENGINE-SECRET")
+    if not provided or not secrets.compare_digest(provided, ENGINE_SECRET):
+        logger.warning(f"ENGINE: Authentication failed from IP {get_remote_address(request)}")
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Trigger scoring job immediately via APScheduler (non-blocking)
+    scheduler.add_job(core_score_all_installations, "date")
+    return {"message": "Scoring triggered"}
+
+# FastAPI initialized above
 
 # ─── Auth Dependency ───────────────────────────────────────────────────────────
 bearer_scheme = HTTPBearer(auto_error=False)
