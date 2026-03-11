@@ -64,7 +64,8 @@ from config import (
     STRIPE_SECRET_KEY, 
     RESEND_API_KEY, 
     ENVIRONMENT, 
-    ALLOWED_ORIGIN
+    ALLOWED_ORIGINS,
+    CORS_ORIGIN_REGEX,
 )
 import resend
 import stripe
@@ -312,8 +313,8 @@ app.add_middleware(SlowAPIMiddleware)
 # Correct CORS for production domains
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in ALLOWED_ORIGIN.split(",")],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -403,13 +404,6 @@ Tenant = Annotated[TenantContext, Depends(get_tenant)]
 
 # ─── Endpoints: Infrastructure ─────────────────────────────────────────────────
 
-@app.get("/health")
-def health_check():
-    return {
-        "status": "ok",
-        "service": "solvist-api",
-        "environment": ENVIRONMENT
-    }
 
 @app.post("/api/create-checkout-session")
 @limiter.limit("5/minute")
