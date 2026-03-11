@@ -314,6 +314,16 @@ async def get_import_tenant(
 
 ImportTenant = Annotated[TenantContext, Depends(get_import_tenant)]
 
+
+async def get_auth_context(
+    request: Request,
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
+) -> TenantContext:
+    return await get_import_tenant(request, credentials)
+
+
+AuthTenant = Annotated[TenantContext, Depends(get_auth_context)]
+
 class LocationTypeEnum(str, Enum):
     residential = "residential"
     industrial = "industrial"
@@ -1507,8 +1517,8 @@ def public_platform_stats(request: Request):
 # ─── Endpoints: Commercial Dashboard V1 ────────────────────────────────────────
 @app.get("/api/dashboard")
 @limiter.limit("30/minute")
-def dashboard(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
+def dashboard(request: Request, tenant: AuthTenant):
+    db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
 
     # BLOCK 2: Fetch Active Threshold Parameter
     # Service role needed to read company_parameters as it has no RLS (engine/admin use)
@@ -1652,8 +1662,8 @@ def activation_list(request: Request, tenant: Tenant, limit: int = 20, offset: i
 # ─── Endpoints: Insights Panel V1 ──────────────────────────────────────────────
 @app.get("/api/insights")
 @limiter.limit("30/minute")
-def insights(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
+def insights(request: Request, tenant: AuthTenant):
+    db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
     current_month = date.today().replace(day=1).isoformat()
     res = db.table("opportunity_scores").select("battery_score, maintenance_score, ev_score").eq("company_id", tenant.company_id).eq("calculated_month", current_month).execute()
     
@@ -2136,8 +2146,8 @@ def get_client_timeline(request: Request, client_id: str, tenant: Tenant):
 
 @app.get("/api/pipeline")
 @limiter.limit("30/minute")
-def pipeline(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
+def pipeline(request: Request, tenant: AuthTenant):
+    db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
     res = (
         db.table("clients")
         .select("id, client_alias, client_name, opportunity_type, expected_value, close_probability, score, priority_score, status, notes, estimated_annual_export_kwh, estimated_battery_savings, battery_payback_years, battery_opportunity_score, sales_script_long, sales_script_short, opportunity_reason")
@@ -2158,8 +2168,8 @@ def pipeline(request: Request, tenant: Tenant):
 
 @app.get("/api/opportunities")
 @limiter.limit("30/minute")
-def opportunities(request: Request, tenant: Tenant, limit: int = 100):
-    db = scoped_client(tenant.jwt)
+def opportunities(request: Request, tenant: AuthTenant, limit: int = 100):
+    db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
     safe_limit = max(1, min(limit, 500))
     res = (
         db.table("clients")
