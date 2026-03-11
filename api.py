@@ -905,7 +905,21 @@ def _parse_float_value(raw_value: object, default: float = 0.0) -> float:
     try:
         return float(raw_value)
     except Exception:
-        return default
+        try:
+            normalized = str(raw_value).strip().replace(" ", "")
+            if not normalized:
+                return default
+
+            if normalized.count(",") == 1 and normalized.count(".") == 0:
+                normalized = normalized.replace(",", ".")
+            elif normalized.count(",") > 0 and normalized.count(".") > 0:
+                if normalized.rfind(",") > normalized.rfind("."):
+                    normalized = normalized.replace(".", "").replace(",", ".")
+                else:
+                    normalized = normalized.replace(",", "")
+            return float(normalized)
+        except Exception:
+            return default
 
 
 def _normalize_location_type(raw_value: object) -> str:
@@ -969,10 +983,12 @@ def _parse_installations_from_dataframe(
 
     insert_payload: List[Dict] = []
     for idx, row in df.iterrows():
-        try:
-            kwp = float(row[kwp_col])
-            year = int(row[year_col])
-        except Exception:
+        kwp = _parse_float_value(row[kwp_col], float("nan"))
+        year_float = _parse_float_value(row[year_col], float("nan"))
+        if pd.isna(kwp) or pd.isna(year_float):
+            continue
+        year = int(year_float)
+        if year < 1900 or year > (datetime.now(timezone.utc).year + 1):
             continue
 
         c_name = "Unknown Client"
