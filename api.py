@@ -8,7 +8,7 @@ Replaces generic CRM endpoints with:
 - POST /engine/score-all (Monthly Scoring Job)
 """
 
-from __future__ import annotations
+# from __future__ import annotations (Removed to fix Pydantic ForwardRef issues with UploadFile)
 
 import sys
 import os
