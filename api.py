@@ -199,6 +199,241 @@ def _tenant_key(request: Request) -> str:
 
 limiter = Limiter(key_func=_tenant_key, default_limits=["60/minute"])
 
+# ------------------------------------
+# SCORING ENGINE
+# ------------------------------------
+
+ENGINE_SECRET = os.getenv("ENGINE_SECRET")
+
+def core_score_all_installations():
+    start_time = datetime.now(timezone.utc)
+    logger.info("ENGINE: Starting full opportunity scoring run.")
+
+    # Fresh admin client to avoid stale schema cache
+    fresh_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+    # PREP FOR BLOCK 1: Set calculated_month to first day of current month
+    calculated_month = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    now_year = start_time.year
+
+    # 2. Prevent Full-Table Scan: Fetch companies first
+    comp_res = fresh_admin.table("companies").select("id, name").execute()
+    companies = comp_res.data or []
+    
+    total_companies = len(companies)
+    total_installations_scored = 0
+    companies_failed = 0
+    
+    logger.info(f"ENGINE: Found {total_companies} companies to process.")
+
+    # 3. Iterate Per Company (Tenant Isolation)
+    for company in companies:
+        company_id = company["id"]
+        company_name = company.get("name", "Unknown")
+        
+        try:
+            logger.info(f"ENGINE: Processing company {company_name} ({company_id})")
+            
+            # BLOCK 2: Fetch Company Parameters (1 fetch per tenant)
+            try:
+                comp_param_res = fresh_admin.table("company_parameters").select("*").eq("company_id", company_id).execute()
+                comp_params = comp_param_res.data[0] if comp_param_res.data else {}
+            except Exception:
+                comp_params = {}
+                
+            # Resolve weights, use defaults if missing
+            battery_weight = float(comp_params.get("battery_weight", 1.0) if comp_params.get("battery_weight") is not None else 1.0)
+            maintenance_weight = float(comp_params.get("maintenance_weight", 1.0) if comp_params.get("maintenance_weight") is not None else 1.0)
+            expansion_weight = float(comp_params.get("expansion_weight", 1.0) if comp_params.get("expansion_weight") is not None else 1.0)
+            ev_weight = float(comp_params.get("ev_weight", 1.0) if comp_params.get("ev_weight") is not None else 1.0)
+            industrial_weight = float(comp_params.get("industrial_weight", 1.0) if comp_params.get("industrial_weight") is not None else 1.0)
+            
+            # Fetch installations specifically for this tenant
+            inst_res = fresh_admin.table("installations").select("*").eq("company_id", company_id).execute()
+            installations = inst_res.data or []
+            
+            if not installations:
+                logger.info(f"ENGINE: No installations found for company {company_name}")
+                continue
+                
+            upsert_payload = []
+            clients_payload = []
+            
+            for inst in installations:
+                
+                # Use centralized pure-python business logic engine
+                weights = {
+                    "battery": battery_weight,
+                    "maintenance": maintenance_weight,
+                    "expansion": expansion_weight,
+                    "ev": ev_weight,
+                    "industrial": industrial_weight
+                }
+                
+                result = compute_opportunity_score(
+                    installation=inst,
+                    weights=weights,
+                    now_year=now_year,
+                    calculated_month=calculated_month
+                )
+
+                # BLOQUE A.3: solo generar oportunidades comerciales con score >= 40
+                if not result.get("is_opportunity", False):
+                    continue
+                
+                result_copy = result.copy()
+                result_copy.pop("is_opportunity", None)
+                annual_export = result_copy.pop("estimated_annual_export_kwh", 0)
+                battery_savings = result_copy.pop("estimated_battery_savings", 0)
+                payback = result_copy.pop("battery_payback_years", 0)
+                batt_score = result_copy.pop("battery_opportunity_score", 0)
+                sales_script_long = result_copy.pop("sales_script_long", "")
+                sales_script_short = result_copy.pop("sales_script_short", "")
+                opportunity_reason = result_copy.pop("opportunity_reason", "")
+
+                # Compatibilidad con tenants donde opportunity_scores aún no tiene columnas añadidas
+                score_row = result_copy.copy()
+                score_row.pop("close_probability", None)
+                score_row.pop("priority_score", None)
+                score_row.pop("recommendation_level", None)
+                score_row.pop("inverter_score", None)
+                upsert_payload.append(score_row)
+                
+                # Oportunidad única por instalación y expected_value realista
+                score = result["total_score"]
+                opp_type = result["primary_reason"]
+                if opp_type not in [OPP_BATTERY_UPGRADE, OPP_INVERTER_REPLACEMENT, OPP_SYSTEM_EXPANSION]:
+                    opp_type = OPP_BATTERY_UPGRADE
+                expected_value = OPPORTUNITY_VALUES.get(opp_type, 0.0)
+
+                # Close probability tiering
+                if score < 40:
+                    close_prob = 0.1
+                elif score <= 60:
+                    close_prob = 0.25
+                elif score <= 80:
+                    close_prob = 0.45
+                else:
+                    close_prob = 0.65
+                
+                # Dynamic generation of client_alias using UUID snippet
+                client_alias = f"PV-{str(inst.get('id', '0000'))[:8].upper()}"
+                
+                weighted_expected_revenue = expected_value * close_prob
+                
+                # BLOCK F53: Priority Score
+                priority_score = (score * 0.4) + (batt_score * 0.3) + (close_prob * 100 * 0.3)
+
+                clients_payload.append({
+                    "company_id": inst["company_id"],
+                    "client_alias": client_alias,
+                    "anonymous_client": True,
+                    "system_size_kwp": inst.get("kwp"),
+                    "installation_year": inst.get("installation_year"),
+                    "location_type": inst.get("location_type"),
+                    "opportunity_type": opp_type,
+                    "score": score,
+                    "priority_score": round(priority_score, 1),
+                    "expected_value": expected_value,
+                    "close_probability": close_prob,
+                    "weighted_expected_revenue": weighted_expected_revenue,
+                    # Battery fields
+                    "estimated_annual_export_kwh": annual_export,
+                    "estimated_battery_savings": round(float(battery_savings or 0)),
+                    "battery_payback_years": round(float(payback or 0), 1),
+                    "battery_opportunity_score": batt_score,
+                    "sales_script_long": sales_script_long,
+                    "sales_script_short": sales_script_short,
+                    "opportunity_reason": opportunity_reason,
+                })
+                
+            if upsert_payload:
+                # 1. Upsert Opportunity Scores (Legacy Engine Logic)
+                fresh_admin.table("opportunity_scores").upsert(
+                    upsert_payload, 
+                    on_conflict="company_id,installation_id,calculated_month"
+                ).execute()
+                
+                # 2. Upsert Commercial Pipeline (BLOCK R2 pipeline logic)
+                clients_upsert_res = fresh_admin.table("clients").upsert(
+                    clients_payload,
+                    on_conflict="company_id,client_alias"
+                ).execute()
+                
+                # 3. Create Auto Alerts for High Value Opportunities
+                if clients_upsert_res.data:
+                    from datetime import timedelta
+                    thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+                    existing_alerts_res = fresh_admin.table("opportunity_alerts").select("client_id").eq("company_id", company_id).eq("alert_type", "battery_opportunity").gte("created_at", thirty_days_ago).execute()
+                    existing_alert_client_ids = {row["client_id"] for row in (existing_alerts_res.data or [])}
+                    
+                    alerts_payload = []
+                    for c_row in clients_upsert_res.data:
+                        score = float(c_row.get("battery_opportunity_score") or 0)
+                        if score > 80:
+                            client_id = c_row["id"]
+                            alias = c_row.get("client_alias", "Unknown")
+                            if client_id in existing_alert_client_ids:
+                                logger.info(f"ENGINE: Skipping duplicate alert for client {alias}")
+                                continue
+                                
+                            sav = c_row.get("estimated_battery_savings", 0)
+                            pay = c_row.get("battery_payback_years", 0)
+                            
+                            alerts_payload.append({
+                                "client_id": client_id,
+                                "company_id": c_row["company_id"],
+                                "alert_type": "battery_opportunity",
+                                "alert_message": f"High value battery opportunity detected for client {alias}.\nEstimated savings €{sav}.\nPayback {pay} years."
+                            })
+                    if alerts_payload:
+                        fresh_admin.table("opportunity_alerts").insert(alerts_payload).execute()
+                
+                total_installations_scored += len(upsert_payload)
+                logger.info(f"ENGINE: Successfully scored {len(upsert_payload)} installations for {company_name}.")
+                
+        except Exception as e:
+            import traceback
+            logger.error(f"ENGINE: Failed to process company {company_name} ({company_id}): {str(e)}")
+            logger.error(f"ENGINE TRACEBACK: {traceback.format_exc()}")
+            companies_failed += 1
+            # 4. Basic Transaction Safety Logic: Catch error and continue loop
+    runtime_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
+    logger.info(f"ENGINE: Run complete. Scored {total_installations_scored} installations across {total_companies - companies_failed} companies. Failed: {companies_failed}. Runtime: {runtime_seconds:.2f}s")
+    
+    try:
+        fresh_admin.table("execution_tracking").insert({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "runtime_seconds": round(runtime_seconds, 2),
+            "installations_processed": total_installations_scored
+        }).execute()
+        logger.info("ENGINE: Logged execution to tracking table.")
+    except Exception as e:
+        logger.error(f"ENGINE: Failed to log execution to tracking: {e}")
+    
+    return {
+        "message": "Monthly scoring completed", 
+        "total_installations": total_installations_scored,
+        "companies_processed": total_companies - companies_failed,
+        "companies_failed": companies_failed,
+        "runtime_seconds": round(runtime_seconds, 2)
+    }
+
+@app.post("/api/engine/score-all")
+@limiter.limit("5/minute")
+def score_all_installations(request: Request):
+    """
+    Monthly Serverless Job endpoint. Can be triggered manually.
+    """
+    provided = request.headers.get("X-ENGINE-SECRET")
+    if not provided or not secrets.compare_digest(provided, ENGINE_SECRET):
+        logger.warning(f"ENGINE: Authentication failed from IP {get_remote_address(request)}")
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Trigger scoring job immediately via APScheduler (non-blocking)
+    scheduler.add_job(core_score_all_installations, "date")
+    return {"message": "Scoring triggered"}
+
 # ─── Lifespan: Startup / Shutdown ─────────────────────────────────────────────
 from contextlib import asynccontextmanager
 
@@ -215,19 +450,11 @@ async def lifespan(app: FastAPI):
     if not os.getenv("ENGINE_SECRET"):
         logger.warning("ENGINE_SECRET not configured — /api/engine/score-all will return 403.")
 
+    scheduler.add_job(core_score_all_installations, 'interval', hours=24)
     scheduler.start()
     logger.info("APScheduler initialized for daily scoring.")
-        
-#     # Schedule daily scoring job
-    # scheduler.add_job(
-        # core_score_all_installations,
-        # 'interval',
-        # hours=24
-    # )
-    
+
     yield
-    
-    # Shutdown
     scheduler.shutdown()
 
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
@@ -465,6 +692,8 @@ class InstallationCreate(BaseModel):
     dc_ac_ratio: float = 1.0
     has_maintenance_contract: bool = False
     country: str = "Unknown"
+
+InstallationCreate.model_rebuild()
 
 
 PUBLIC_SCAN_MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
@@ -829,12 +1058,8 @@ async def import_installations(request: Request, tenant: Tenant, file: UploadFil
         for chunk in [insert_payload[i:i + 100] for i in range(0, len(insert_payload), 100)]:
             db.table("installations").insert(chunk).execute()
             
-        # Trigger engine job automatically after importing
-        # It's important to run this non-blocking or just call it directly since it's an internal function.
-        # But for large batches calling directly might timeout the request, 
-        # so we schedule it to run immediately via APScheduler or just call it if we don't worry about timeouts (V1).
-        # We will call it directly.
-#                     scheduler.add_job(core_score_all_installations, 'date')
+        # Trigger engine job automatically after importing (non-blocking)
+        scheduler.add_job(core_score_all_installations, 'date')
         
         return {
             "installations_imported": len(insert_payload),
@@ -1259,238 +1484,7 @@ def core_score_all_installations():
     start_time = datetime.now(timezone.utc)
     logger.info("ENGINE: Starting full opportunity scoring run.")
 
-    # Fresh admin client to avoid stale schema cache
-    fresh_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
-    # PREP FOR BLOCK 1: Set calculated_month to first day of current month
-    calculated_month = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-    now_year = start_time.year
-
-    # 2. Prevent Full-Table Scan: Fetch companies first
-    comp_res = fresh_admin.table("companies").select("id, name").execute()
-    companies = comp_res.data or []
-    
-    total_companies = len(companies)
-    total_installations_scored = 0
-    companies_failed = 0
-    
-    logger.info(f"ENGINE: Found {total_companies} companies to process.")
-
-    # 3. Iterate Per Company (Tenant Isolation)
-    for company in companies:
-        company_id = company["id"]
-        company_name = company.get("name", "Unknown")
-        
-        try:
-            logger.info(f"ENGINE: Processing company {company_name} ({company_id})")
-            
-            # BLOCK 2: Fetch Company Parameters (1 fetch per tenant)
-            try:
-                comp_param_res = fresh_admin.table("company_parameters").select("*").eq("company_id", company_id).execute()
-                comp_params = comp_param_res.data[0] if comp_param_res.data else {}
-            except Exception:
-                comp_params = {}
-                
-            # Resolve weights, use defaults if missing
-            battery_weight = float(comp_params.get("battery_weight", 1.0) if comp_params.get("battery_weight") is not None else 1.0)
-            maintenance_weight = float(comp_params.get("maintenance_weight", 1.0) if comp_params.get("maintenance_weight") is not None else 1.0)
-            expansion_weight = float(comp_params.get("expansion_weight", 1.0) if comp_params.get("expansion_weight") is not None else 1.0)
-            ev_weight = float(comp_params.get("ev_weight", 1.0) if comp_params.get("ev_weight") is not None else 1.0)
-            industrial_weight = float(comp_params.get("industrial_weight", 1.0) if comp_params.get("industrial_weight") is not None else 1.0)
-            
-            # Fetch installations specifically for this tenant
-            inst_res = fresh_admin.table("installations").select("*").eq("company_id", company_id).execute()
-            installations = inst_res.data or []
-            
-            if not installations:
-                logger.info(f"ENGINE: No installations found for company {company_name}")
-                continue
-                
-            upsert_payload = []
-            clients_payload = []
-            
-            for inst in installations:
-                
-                # Use centralized pure-python business logic engine
-                weights = {
-                    "battery": battery_weight,
-                    "maintenance": maintenance_weight,
-                    "expansion": expansion_weight,
-                    "ev": ev_weight,
-                    "industrial": industrial_weight
-                }
-                
-                result = compute_opportunity_score(
-                    installation=inst,
-                    weights=weights,
-                    now_year=now_year,
-                    calculated_month=calculated_month
-                )
-
-                # BLOQUE A.3: solo generar oportunidades comerciales con score >= 40
-                if not result.get("is_opportunity", False):
-                    continue
-                
-                result_copy = result.copy()
-                result_copy.pop("is_opportunity", None)
-                annual_export = result_copy.pop("estimated_annual_export_kwh", 0)
-                battery_savings = result_copy.pop("estimated_battery_savings", 0)
-                payback = result_copy.pop("battery_payback_years", 0)
-                batt_score = result_copy.pop("battery_opportunity_score", 0)
-                sales_script_long = result_copy.pop("sales_script_long", "")
-                sales_script_short = result_copy.pop("sales_script_short", "")
-                opportunity_reason = result_copy.pop("opportunity_reason", "")
-
-                # Compatibilidad con tenants donde opportunity_scores aún no tiene columnas añadidas
-                score_row = result_copy.copy()
-                score_row.pop("close_probability", None)
-                score_row.pop("priority_score", None)
-                score_row.pop("recommendation_level", None)
-                score_row.pop("inverter_score", None)
-                upsert_payload.append(score_row)
-                
-                # Oportunidad única por instalación y expected_value realista
-                score = result["total_score"]
-                opp_type = result["primary_reason"]
-                if opp_type not in [OPP_BATTERY_UPGRADE, OPP_INVERTER_REPLACEMENT, OPP_SYSTEM_EXPANSION]:
-                    opp_type = OPP_BATTERY_UPGRADE
-                expected_value = OPPORTUNITY_VALUES.get(opp_type, 0.0)
-
-                # Close probability tiering
-                if score < 40:
-                    close_prob = 0.1
-                elif score <= 60:
-                    close_prob = 0.25
-                elif score <= 80:
-                    close_prob = 0.45
-                else:
-                    close_prob = 0.65
-                
-                # Dynamic generation of client_alias using UUID snippet
-                client_alias = f"PV-{str(inst.get('id', '0000'))[:8].upper()}"
-                
-                weighted_expected_revenue = expected_value * close_prob
-                
-                # BLOCK F53: Priority Score
-                priority_score = (score * 0.4) + (batt_score * 0.3) + (close_prob * 100 * 0.3)
-
-                # BLOCK F58 — OPPORTUNITY CONFIDENCE LABEL
-                if score >= 80:
-                    rec_level = "Candidato fuerte"
-                elif score >= 60:
-                    rec_level = "Buena oportunidad"
-                elif score >= 40:
-                    rec_level = "Oportunidad moderada"
-                else:
-                    rec_level = "Baja prioridad"
-
-                clients_payload.append({
-                    "company_id": inst["company_id"],
-                    "client_alias": client_alias,
-                    "anonymous_client": True,
-                    "system_size_kwp": inst.get("kwp"),
-                    "installation_year": inst.get("installation_year"),
-                    "location_type": inst.get("location_type"),
-                    "opportunity_type": opp_type,
-                    "score": score,
-                    "priority_score": round(priority_score, 1),
-                    "expected_value": expected_value,
-                    "close_probability": close_prob,
-                    "weighted_expected_revenue": weighted_expected_revenue,
-                    # Battery fields
-                    "estimated_annual_export_kwh": annual_export,
-                    "estimated_battery_savings": round(float(battery_savings or 0)),
-                    "battery_payback_years": round(float(payback or 0), 1),
-                    "battery_opportunity_score": batt_score,
-                    "sales_script_long": sales_script_long,
-                    "sales_script_short": sales_script_short,
-                    "opportunity_reason": opportunity_reason,
-                })
-                
-            if upsert_payload:
-                # 1. Upsert Opportunity Scores (Legacy Engine Logic)
-                fresh_admin.table("opportunity_scores").upsert(
-                    upsert_payload, 
-                    on_conflict="company_id,installation_id,calculated_month"
-                ).execute()
-                
-                # 2. Upsert Commercial Pipeline (BLOCK R2 pipeline logic)
-                clients_upsert_res = fresh_admin.table("clients").upsert(
-                    clients_payload,
-                    on_conflict="company_id,client_alias"
-                ).execute()
-                
-                # 3. Create Auto Alerts for High Value Opportunities
-                if clients_upsert_res.data:
-                    from datetime import timedelta
-                    thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-                    existing_alerts_res = fresh_admin.table("opportunity_alerts").select("client_id").eq("company_id", company_id).eq("alert_type", "battery_opportunity").gte("created_at", thirty_days_ago).execute()
-                    existing_alert_client_ids = {row["client_id"] for row in (existing_alerts_res.data or [])}
-                    
-                    alerts_payload = []
-                    for c_row in clients_upsert_res.data:
-                        score = float(c_row.get("battery_opportunity_score") or 0)
-                        if score > 80:
-                            client_id = c_row["id"]
-                            alias = c_row.get("client_alias", "Unknown")
-                            if client_id in existing_alert_client_ids:
-                                logger.info(f"ENGINE: Skipping duplicate alert for client {alias}")
-                                continue
-                                
-                            sav = c_row.get("estimated_battery_savings", 0)
-                            pay = c_row.get("battery_payback_years", 0)
-                            
-                            alerts_payload.append({
-                                "client_id": client_id,
-                                "company_id": c_row["company_id"],
-                                "alert_type": "battery_opportunity",
-                                "alert_message": f"High value battery opportunity detected for client {alias}.\nEstimated savings €{sav}.\nPayback {pay} years."
-                            })
-                    if alerts_payload:
-                        fresh_admin.table("opportunity_alerts").insert(alerts_payload).execute()
-                
-                total_installations_scored += len(upsert_payload)
-                logger.info(f"ENGINE: Successfully scored {len(upsert_payload)} installations for {company_name}.")
-                
-        except Exception as e:
-            import traceback
-            logger.error(f"ENGINE: Failed to process company {company_name} ({company_id}): {str(e)}")
-            logger.error(f"ENGINE TRACEBACK: {traceback.format_exc()}")
-            companies_failed += 1
-            # 4. Basic Transaction Safety Logic: Catch error and continue loop
-    runtime_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
-    logger.info(f"ENGINE: Run complete. Scored {total_installations_scored} installations across {total_companies - companies_failed} companies. Failed: {companies_failed}. Runtime: {runtime_seconds:.2f}s")
-    
-    try:
-        fresh_admin.table("execution_tracking").insert({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "runtime_seconds": round(runtime_seconds, 2),
-            "installations_processed": total_installations_scored
-        }).execute()
-        logger.info("ENGINE: Logged execution to tracking table.")
-    except Exception as e:
-        logger.error(f"ENGINE: Failed to log execution to tracking: {e}")
-    
-    return {
-        "message": "Monthly scoring completed", 
-        "total_installations": total_installations_scored,
-        "companies_processed": total_companies - companies_failed,
-        "companies_failed": companies_failed,
-        "runtime_seconds": round(runtime_seconds, 2)
-    }
-
-@app.post("/api/engine/score-all")
-@limiter.limit("5/minute")
-def score_all_installations(request: Request):
-    """
-    Monthly Serverless Job endpoint. Can be triggered manually.
-    """
-    provided = request.headers.get("X-ENGINE-SECRET")
-    if not provided or not secrets.compare_digest(provided, ENGINE_SECRET):
-        logger.warning(f"ENGINE: Authentication failed from IP {get_remote_address(request)}")
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    return core_score_all_installations()
+    # Removed moved engine block
 
 # ─── Endpoints: Minimalist PDF Generation V1 ───────────────────────────────────
 @app.get("/api/activation/{installation_id}/pdf")
