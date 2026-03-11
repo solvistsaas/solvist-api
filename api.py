@@ -190,6 +190,103 @@ def scoped_client(jwt: str) -> Client:
     client.postgrest.auth(jwt)
     return client
 
+# ─── Models & Enums ───────────────────────────────────────────────────────────
+class TenantContext(BaseModel):
+    user_id: str
+    company_id: str
+    jwt: str
+    installation_limit: int
+
+    class Config:
+        frozen = True
+
+async def get_tenant(
+    request: Request,
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
+) -> TenantContext:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+
+    token = credentials.credentials
+    try:
+        auth_response = admin_client.auth.get_user(token)
+        user_id = auth_response.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+
+    db = scoped_client(token)
+    try:
+        res_user = db.table("users").select("company_id").eq("id", user_id).single().execute()
+        company_id = res_user.data.get("company_id")
+    except Exception:
+        raise HTTPException(status_code=403, detail="User not registered.")
+
+    if not company_id:
+        raise HTTPException(status_code=403, detail="User has no company.")
+
+    # Fetch installation limit from companies (RLS applies or fallback to admin query if needed)
+    try:
+        # Service role to fetch plan limits (companies RLS might be strict)
+        res_comp = admin_client.table("companies").select("installation_limit").eq("id", company_id).single().execute()
+        max_inst = res_comp.data.get("installation_limit") or 500
+    except Exception:
+        max_inst = 500
+
+    tenant = TenantContext(user_id=user_id, company_id=company_id, jwt=token, installation_limit=max_inst)
+    request.state.tenant = tenant
+    return tenant
+
+Tenant = Annotated[TenantContext, Depends(get_tenant)]
+
+class LocationTypeEnum(str, Enum):
+    residential = "residential"
+    industrial = "industrial"
+
+class InstallationCreate(BaseModel):
+    client_name: str
+    installation_year: int
+    kwp: float
+    inverter_model: str = "Unknown"
+    has_battery: bool = False
+    location_type: LocationTypeEnum = LocationTypeEnum.residential
+    tariff_type: str = "standard"
+    estimated_consumption: float = 0
+    dc_ac_ratio: float = 1.0
+    has_maintenance_contract: bool = False
+    country: str = "Unknown"
+
+InstallationCreate.model_rebuild()
+
+class OpportunityTypeEnum(str, Enum):
+    battery_upgrade = "battery_upgrade"
+    inverter_replacement = "inverter_replacement"
+    system_expansion = "system_expansion"
+    maintenance = "maintenance"
+    ev_charger = "ev_charger"
+
+class TrackingUpdate(BaseModel):
+    installation_id: str
+    opportunity_type: OpportunityTypeEnum
+    contacted: bool = False
+    result: str = ""
+    closed: bool = False
+    value: float = 0.0
+
+class StatusUpdatePayload(BaseModel):
+    status: Literal["New", "Contacted", "Proposal", "Closed", "Lost"]
+    closed_value: float = 0.0
+
+class NotesUpdatePayload(BaseModel):
+    notes: str
+
+class SalesActionTypeEnum(str, Enum):
+    called = "called"
+    email_sent = "email_sent"
+    proposal_sent = "proposal_sent"
+
+class SalesActionPayload(BaseModel):
+    action: SalesActionTypeEnum
+    note: str = ""
 
 # ─── App & Rate Limiter ────────────────────────────────────────────────────────
 def _tenant_key(request: Request) -> str:
@@ -474,54 +571,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class TenantContext(BaseModel):
-    user_id: str
-    company_id: str
-    jwt: str
-    installation_limit: int
-
-    class Config:
-        frozen = True
-
-
-async def get_tenant(
-    request: Request,
-    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
-) -> TenantContext:
-    if not credentials:
-        raise HTTPException(status_code=401, detail="Missing Authorization header.")
-
-    token = credentials.credentials
-    try:
-        auth_response = admin_client.auth.get_user(token)
-        user_id = auth_response.user.id
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token.")
-
-    db = scoped_client(token)
-    try:
-        res_user = db.table("users").select("company_id").eq("id", user_id).single().execute()
-        company_id = res_user.data.get("company_id")
-    except Exception:
-        raise HTTPException(status_code=403, detail="User not registered.")
-
-    if not company_id:
-        raise HTTPException(status_code=403, detail="User has no company.")
-
-    # Fetch installation limit from companies (RLS applies or fallback to admin query if needed)
-    try:
-        # Service role to fetch plan limits (companies RLS might be strict)
-        res_comp = admin_client.table("companies").select("installation_limit").eq("id", company_id).single().execute()
-        max_inst = res_comp.data.get("installation_limit") or 500
-    except Exception:
-        max_inst = 500
-
-    tenant = TenantContext(user_id=user_id, company_id=company_id, jwt=token, installation_limit=max_inst)
-    request.state.tenant = tenant
-    return tenant
-
-
-Tenant = Annotated[TenantContext, Depends(get_tenant)]
+# Moved above
 
 
 
@@ -678,24 +728,7 @@ def create_checkout_session(request: Request, tenant: Tenant):
 
 
 # ─── Endpoints: Data Ingestion (Plan Enforcement) ──────────────────────────────
-class LocationTypeEnum(str, Enum):
-    residential = "residential"
-    industrial = "industrial"
-
-class InstallationCreate(BaseModel):
-    client_name: str
-    installation_year: int
-    kwp: float
-    inverter_model: str = "Unknown"
-    has_battery: bool = False
-    location_type: LocationTypeEnum = LocationTypeEnum.residential
-    tariff_type: str = "standard"
-    estimated_consumption: float = 0
-    dc_ac_ratio: float = 1.0
-    has_maintenance_contract: bool = False
-    country: str = "Unknown"
-
-InstallationCreate.model_rebuild()
+# Moved above
 
 
 PUBLIC_SCAN_MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
@@ -1448,13 +1481,7 @@ class OpportunityTypeEnum(str, Enum):
     ev = "ev"
     industrial = "industrial"
 
-class TrackingUpdate(BaseModel):
-    installation_id: str
-    opportunity_type: OpportunityTypeEnum
-    contacted: bool = False
-    result: str = ""
-    closed: bool = False
-    value: float = 0.0
+# Moved above
 
 @app.post("/api/tracking")
 @limiter.limit("30/minute")
@@ -1879,9 +1906,7 @@ def revenue_at_risk(request: Request, tenant: Tenant):
     return res.data
 
 
-class StatusUpdatePayload(BaseModel):
-    status: Literal["New", "Contacted", "Proposal", "Closed", "Lost"]
-    closed_value: float = 0.0
+# Moved above
 
 @app.post("/api/client/{client_id}/status")
 @limiter.limit("30/minute")
@@ -2142,8 +2167,7 @@ def client_contacted(request: Request, client_id: str, tenant: Tenant):
     return res.data[0]
 
 
-class NotesUpdatePayload(BaseModel):
-    notes: str
+# Moved above
 
 @app.post("/api/client/{client_id}/notes")
 @limiter.limit("30/minute")
@@ -2188,15 +2212,10 @@ def get_client_email_draft(request: Request, client_id: str, tenant: Tenant):
     return build_sales_email_draft(res.data)
 
 
-class SalesActionTypeEnum(str, Enum):
-    called = "called"
-    email_sent = "email_sent"
-    proposal_sent = "proposal_sent"
+# Moved above
 
 
-class SalesActionPayload(BaseModel):
-    action: SalesActionTypeEnum
-    note: str = ""
+# Moved above
 
 
 @app.post("/api/client/{client_id}/sales-action")
