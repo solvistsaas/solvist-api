@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT --workers 2
     envVars:
       - key: SUPABASE_URL
         sync: false
@@ -21,6 +21,4 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: ALLOWED_ORIGIN
-        value: "https://solvist.io,https://app.solvist.io,https://solvist-frontend.vercel.app"
-      - key: CORS_ORIGIN_REGEX
-        value: "https://.*\.vercel\.app"
+        value: "https://solvist-frontend.vercel.app"
