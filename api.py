@@ -998,16 +998,32 @@ def _parse_installations_from_dataframe(
     columns_lower = {col: str(col).lower().strip() for col in df.columns}
     df.rename(columns=columns_lower, inplace=True)
 
-    kwp_aliases = ["system_size_kwp", "kwp", "system_size", "size_kwp", "installed_kwp", "power_kwp"]
-    year_aliases = ["installation_year", "year", "installed_year", "commission_year"]
+    kwp_aliases = [
+        "system_size_kwp",
+        "kwp",
+        "system_size",
+        "size_kwp",
+        "installed_kwp",
+        "power_kwp",
+        "system size (kwp)",
+        "system size kwp",
+    ]
+    year_aliases = [
+        "installation_year",
+        "installation year",
+        "year",
+        "installed_year",
+        "commission_year",
+    ]
     location_aliases = ["location_type", "client_type", "type", "sector"]
-    name_aliases = ["client_name", "name", "customer", "client"]
+    name_aliases = ["client_name", "client name", "name", "customer", "client"]
     battery_aliases = ["has_battery", "battery", "battery_installed", "with_battery"]
     tariff_aliases = ["tariff_type", "tariff", "rate_type"]
     consumption_aliases = ["estimated_consumption", "consumption_kwh", "annual_consumption", "consumption"]
     dcac_aliases = ["dc_ac_ratio", "dcac_ratio", "dcac"]
     maintenance_aliases = ["has_maintenance_contract", "maintenance_contract", "with_maintenance"]
     country_aliases = ["country", "region", "location"]
+    inverter_aliases = ["inverter_model", "inverter brand", "inverter_brand", "inverter"]
 
     kwp_col = _find_first_column(df, kwp_aliases)
     year_col = _find_first_column(df, year_aliases)
@@ -1019,6 +1035,7 @@ def _parse_installations_from_dataframe(
     dcac_col = _find_first_column(df, dcac_aliases)
     maintenance_col = _find_first_column(df, maintenance_aliases)
     country_col = _find_first_column(df, country_aliases)
+    inverter_col = _find_first_column(df, inverter_aliases)
 
     if not kwp_col or not year_col:
         detail = (
@@ -1053,6 +1070,7 @@ def _parse_installations_from_dataframe(
                 "client_alias": client_alias,
                 "kwp": kwp,
                 "installation_year": year,
+                "inverter_model": str(row[inverter_col]).strip() if inverter_col and pd.notna(row[inverter_col]) else "Unknown",
                 "location_type": _normalize_location_type(row[location_col]) if location_col else "residential",
                 "has_battery": _parse_bool_value(row[battery_col], False) if battery_col else False,
                 "tariff_type": str(row[tariff_col]).strip().lower() if tariff_col and pd.notna(row[tariff_col]) else "standard",
