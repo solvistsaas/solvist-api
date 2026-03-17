@@ -126,8 +126,13 @@ PROD_ALLOWED_ORIGINS = {
     "https://app.solvist.io",
 }
 
-IMPORT_MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
+IMPORT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 SCORING_BATCH_SIZE = 500
+LAST_IMPORT_STATUS: Dict[str, float] = {
+    "last_import_rows": 0,
+    "last_import_duration": 0.0,
+    "last_import_opportunities": 0,
+}
 
 
 # ─── Models & Enums ───────────────────────────────────────────────────────────
@@ -1076,9 +1081,11 @@ def _parse_installations_from_dataframe(
             c_name = str(row[name_col]).strip()
 
         client_alias = f"{alias_prefix}-{idx + 1:04d}"
+        stable_id_source = f"{company_id}:{c_name}:{year}:{kwp}"
+        stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, stable_id_source))
         insert_payload.append(
             {
-                "id": str(uuid.uuid4()),
+                "id": stable_id,
                 "company_id": company_id,
                 "client_name": c_name,
                 "client_alias": client_alias,
@@ -1361,7 +1368,6 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
         logger.info("IMPORT: Parsed %s valid installations for company_id=%s", len(insert_payload), tenant.company_id)
         for row in insert_payload:
             row.pop("client_alias", None)
-            row.pop("id", None)
             
         if not insert_payload:
             raise HTTPException(status_code=400, detail="No valid installations found in CSV")
@@ -1373,24 +1379,38 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
         if current_count + len(insert_payload) > tenant.installation_limit:
             raise HTTPException(status_code=402, detail=f"Plan limit exceeded. Would reach {current_count + len(insert_payload)} but max is {tenant.installation_limit}")
             
-        # Insert
+        # Upsert in batches (dedupe by id)
         for chunk in [insert_payload[i:i + 100] for i in range(0, len(insert_payload), 100)]:
-            db.table("installations").insert(chunk).execute()
+            db.table("installations").upsert(chunk, on_conflict="id").execute()
         logger.info("IMPORT: Inserted %s installations for company_id=%s", len(insert_payload), tenant.company_id)
             
         # Trigger engine job automatically after importing (non-blocking)
-        scheduler.add_job(core_score_all_installations, 'date')
+        scoring_triggered = False
+        try:
+            scheduler.add_job(core_score_all_installations, 'date')
+            scoring_triggered = True
+        except Exception as scoring_error:
+            logger.warning("IMPORT: scoring trigger failed for company_id=%s error=%s", tenant.company_id, scoring_error)
+
         duration_seconds = (datetime.now(timezone.utc) - import_started_at).total_seconds()
+        LAST_IMPORT_STATUS["last_import_rows"] = len(insert_payload)
+        LAST_IMPORT_STATUS["last_import_duration"] = round(duration_seconds, 3)
+        LAST_IMPORT_STATUS["last_import_opportunities"] = 0
+
         logger.info(
-            "IMPORT: company_id=%s rows_imported=%s duration_seconds=%.3f",
-            tenant.company_id,
-            len(insert_payload),
-            duration_seconds,
+            "import_completed",
+            extra={
+                "company_id": tenant.company_id,
+                "installations_imported": len(insert_payload),
+                "opportunities_generated": 0,
+                "duration_seconds": round(duration_seconds, 3),
+                "scoring_triggered": scoring_triggered,
+            },
         )
         
         return {
             "installations_imported": len(insert_payload),
-            "scoring_triggered": True
+            "scoring_triggered": scoring_triggered
         }
     except HTTPException:
         raise
@@ -2769,6 +2789,16 @@ def health_check(request: Request):
         "status": "ok",
         "service": "solvist-api",
         "environment": ENVIRONMENT
+    }
+
+
+@app.get("/api/import/status")
+@limiter.limit("30/minute")
+def import_status(request: Request):
+    return {
+        "last_import_rows": int(LAST_IMPORT_STATUS.get("last_import_rows", 0)),
+        "last_import_duration": float(LAST_IMPORT_STATUS.get("last_import_duration", 0.0)),
+        "last_import_opportunities": int(LAST_IMPORT_STATUS.get("last_import_opportunities", 0)),
     }
 
 
