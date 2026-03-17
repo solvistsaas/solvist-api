@@ -1038,14 +1038,28 @@ def _parse_installations_from_dataframe(
     inverter_col = _find_first_column(df, inverter_aliases)
 
     if not kwp_col or not year_col:
+        required_columns_display = ["System Size (kWp)", "Installation Year"]
+        required_columns_normalized = [col.lower() for col in required_columns_display]
+        missing = [
+            display
+            for display, normalized in zip(required_columns_display, required_columns_normalized)
+            if normalized not in df.columns
+        ]
+        if len(missing) == len(required_columns_display):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Missing required columns",
+                    "required_any_of": required_columns_display,
+                    "columns_detected": list(df.columns),
+                },
+            )
+
         detail = (
             required_columns_error_message
             or "Missing required columns: System Size (kWp) or Installation Year"
         )
-        raise HTTPException(
-            status_code=400,
-            detail=detail,
-        )
+        raise HTTPException(status_code=400, detail=detail)
 
     insert_payload: List[Dict] = []
     for idx, row in df.iterrows():
@@ -2788,7 +2802,14 @@ def health_pipeline(request: Request):
 @limiter.limit("30/minute")
 def debug_auth(request: Request):
     if ENVIRONMENT == "production":
-        raise HTTPException(status_code=404, detail="Not Found")
+        try:
+            token, _, _ = parse_bearer_token(request.headers.get("Authorization"))
+        except HTTPException:
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
+        if not engine_secret or not secrets.compare_digest(token, engine_secret):
+            raise HTTPException(status_code=404, detail="Not Found")
 
     header_raw = (request.headers.get("Authorization") or "").strip()
     engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
