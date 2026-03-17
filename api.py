@@ -123,6 +123,7 @@ COUNTRY_TO_CURRENCY_FALLBACK: Dict[str, str] = {
 
 PROD_ALLOWED_ORIGINS = {
     "https://solvist-frontend.vercel.app",
+    "https://solvist.io",
     "https://app.solvist.io",
 }
 
@@ -2804,7 +2805,7 @@ def import_status(request: Request):
 
 @app.get("/health/pipeline")
 @limiter.limit("30/minute")
-def health_pipeline(request: Request):
+def health_pipeline(request: Request, tenant: AuthTenant):
     database_status = "ok"
     database_error = ""
     try:
@@ -2832,14 +2833,7 @@ def health_pipeline(request: Request):
 @limiter.limit("30/minute")
 def debug_auth(request: Request):
     if ENVIRONMENT == "production":
-        try:
-            token, _, _ = parse_bearer_token(request.headers.get("Authorization"))
-        except HTTPException:
-            raise HTTPException(status_code=404, detail="Not Found")
-
-        engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
-        if not engine_secret or not secrets.compare_digest(token, engine_secret):
-            raise HTTPException(status_code=404, detail="Not Found")
+        raise HTTPException(status_code=404, detail="Not Found")
 
     header_raw = (request.headers.get("Authorization") or "").strip()
     engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
