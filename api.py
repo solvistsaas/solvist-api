@@ -1233,7 +1233,7 @@ def _download_google_sheet_csv_bytes(google_sheet_url: str, max_bytes: int) -> b
 
     request = UrlRequest(export_url, headers={"User-Agent": "SolvistPortfolioScan/1.0"})
     try:
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=60) as response:
             chunks: List[bytes] = []
             total = 0
             while True:
@@ -1263,7 +1263,7 @@ def _detect_currency_from_ip(ip_address: str) -> str:
     lookup_url = f"https://ipapi.co/{ip_address}/json"
     request = UrlRequest(lookup_url, headers={"User-Agent": "SolvistPortfolioScan/1.0"})
     try:
-        with urlopen(request, timeout=4) as response:
+        with urlopen(request, timeout=60) as response:
             raw_payload = response.read()
     except Exception as geolocation_error:
         logger.warning(f"Currency geolocation request failed: {geolocation_error}")
