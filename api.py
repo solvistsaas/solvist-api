@@ -71,6 +71,8 @@ from config import (
 )
 import resend
 import stripe
+import psycopg2
+from db import get_db_connection
 
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
@@ -2946,3 +2948,38 @@ def system_check(request: Request):
         "users_count": users_count,
         "installations_count": installations_count
     }
+
+
+@app.get("/db-test")
+@limiter.limit("10/minute")
+def db_test(request: Request):
+    try:
+        conn = get_db_connection()
+    except Exception:
+        raise HTTPException(status_code=500, detail="Database connection not configured.")
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM public.companies ORDER BY created_at ASC LIMIT 1;")
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=400, detail="No company found to attach installation.")
+                company_id = row[0]
+
+                cur.execute(
+                    """
+                    INSERT INTO public.installations (company_id, client_name, installation_year, kwp)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id;
+                    """,
+                    (company_id, "DB Test Client", 2020, 5.0),
+                )
+                inserted_id = cur.fetchone()[0]
+        return {"inserted_id": str(inserted_id)}
+    except HTTPException:
+        raise
+    except psycopg2.Error:
+        raise HTTPException(status_code=500, detail="Database insert failed.")
+    finally:
+        conn.close()
