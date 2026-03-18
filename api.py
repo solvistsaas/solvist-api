@@ -33,6 +33,7 @@ from urllib.error import URLError, HTTPError
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, File, UploadFile, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -125,11 +126,13 @@ COUNTRY_TO_CURRENCY_FALLBACK: Dict[str, str] = {
 
 PROD_ALLOWED_ORIGINS = {
     "https://solvist-frontend.vercel.app",
+    "https://solvist.io",
     "https://app.solvist.io",
 }
 
 IMPORT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 SCORING_BATCH_SIZE = 500
+REQUEST_ID_HEADER = "X-Request-Id"
 LAST_IMPORT_STATUS: Dict[str, float] = {
     "last_import_rows": 0,
     "last_import_duration": 0.0,
@@ -747,7 +750,29 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, lambda req, exc: Response("Rate limit exceeded", status_code=429))
+
+
+def _request_id_for(request: Request) -> str:
+    existing = getattr(request.state, "request_id", "")
+    if existing:
+        return existing
+
+    incoming = (request.headers.get(REQUEST_ID_HEADER) or "").strip()
+    request_id = incoming[:128] or str(uuid.uuid4())
+    request.state.request_id = request_id
+    return request_id
+
+
+def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    request_id = _request_id_for(request)
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded", "request_id": request_id},
+        headers={REQUEST_ID_HEADER: request_id},
+    )
+
+
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 app.add_middleware(SlowAPIMiddleware)
 
 if ENVIRONMENT == "production":
@@ -865,11 +890,36 @@ def get_recontact_opportunities(request: Request, tenant: Tenant):
 @app.middleware("http")
 async def audit_middleware(request: Request, call_next):
     start = datetime.now(timezone.utc)
-    response = await call_next(request)
+    request_id = _request_id_for(request)
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "Unhandled request error request_id=%s method=%s path=%s",
+            request_id,
+            request.method,
+            request.url.path,
+        )
+        response = JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error", "request_id": request_id},
+        )
+
+    response.headers[REQUEST_ID_HEADER] = request_id
     tenant: Optional[TenantContext] = getattr(request.state, "tenant", None)
+    duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
+
+    logger.info(
+        "REQUEST request_id=%s method=%s path=%s status=%s duration_ms=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
 
     if tenant and request.url.path.startswith("/api"):
-        duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
         log_entry = {
             "id": str(uuid.uuid4()),
             "user_id": tenant.user_id,
@@ -1417,8 +1467,12 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"CSV Import Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
+        logger.exception(
+            "CSV Import Error request_id=%s company_id=%s",
+            getattr(request.state, "request_id", ""),
+            tenant.company_id,
+        )
+        raise HTTPException(status_code=500, detail="Error processing CSV.")
 
 
 @app.post("/api/public/portfolio-scan")
@@ -2796,7 +2850,7 @@ def health_check(request: Request):
 
 @app.get("/api/import/status")
 @limiter.limit("30/minute")
-def import_status(request: Request):
+def import_status(request: Request, tenant: AuthTenant):
     return {
         "last_import_rows": int(LAST_IMPORT_STATUS.get("last_import_rows", 0)),
         "last_import_duration": float(LAST_IMPORT_STATUS.get("last_import_duration", 0.0)),
@@ -2806,42 +2860,31 @@ def import_status(request: Request):
 
 @app.get("/health/pipeline")
 @limiter.limit("30/minute")
-def health_pipeline(request: Request):
+def health_pipeline(request: Request, tenant: AuthTenant):
     database_status = "ok"
-    database_error = ""
     try:
         admin_client.table("companies").select("id").limit(1).execute()
-    except Exception as exc:
+    except Exception:
         database_status = "error"
-        database_error = str(exc)
 
     auth_status = "ok" if _normalize_secret(os.getenv("ENGINE_SECRET")) else "error"
     scoring_status = "ok" if callable(core_score_all_installations) else "error"
     scheduler_status = "running" if getattr(scheduler, "running", False) else "stopped"
 
-    payload = {
+    return {
         "database": database_status,
+        "supabase": database_status,
         "auth": auth_status,
         "scoring_engine": scoring_status,
         "scheduler": scheduler_status,
     }
-    if database_error:
-        payload["database_error"] = database_error
-    return payload
 
 
 @app.get("/debug/auth")
 @limiter.limit("30/minute")
 def debug_auth(request: Request):
     if ENVIRONMENT == "production":
-        try:
-            token, _, _ = parse_bearer_token(request.headers.get("Authorization"))
-        except HTTPException:
-            raise HTTPException(status_code=404, detail="Not Found")
-
-        engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
-        if not engine_secret or not secrets.compare_digest(token, engine_secret):
-            raise HTTPException(status_code=404, detail="Not Found")
+        raise HTTPException(status_code=404, detail="Not Found")
 
     header_raw = (request.headers.get("Authorization") or "").strip()
     engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
@@ -2883,6 +2926,9 @@ def api_version(request: Request):
 @app.get("/api/system-check")
 @limiter.limit("10/minute")
 def system_check(request: Request):
+    if ENVIRONMENT == "production":
+        raise HTTPException(status_code=404, detail="Not Found")
+
     # Uses service role strictly for top-level diagnostic counts
     clients_res = admin_client.table("clients").select("id", count="exact").execute()
     clients_count = clients_res.count if hasattr(clients_res, "count") and clients_res.count is not None else len(clients_res.data)

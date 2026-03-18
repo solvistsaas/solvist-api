@@ -1,2 +1,2 @@
 #!/bin/bash
-uvicorn api:app --host 0.0.0.0 --port 10000 --workers 2
+gunicorn -k uvicorn.workers.UvicornWorker api:app --workers 2 --bind 0.0.0.0:${PORT:-10000} --timeout 60 --graceful-timeout 30 --keep-alive 5
