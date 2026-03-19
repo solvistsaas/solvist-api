@@ -21,6 +21,7 @@ import secrets
 import re
 import json
 import csv
+import time
 from threading import Lock
 from textwrap import dedent
 from datetime import datetime, timezone, date, timedelta
@@ -977,6 +978,16 @@ def create_checkout_session(request: Request, tenant: Tenant):
 
 
 PUBLIC_SCAN_MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
+CSV_MAX_ROWS = 5000
+CSV_PROCESSING_TIMEOUT_SECONDS = 5.0
+CSV_INGESTION_METRICS: Dict[str, int] = {
+    "csv_total_uploads": 0,
+    "csv_malformed_detected": 0,
+    "csv_valid_rows": 0,
+    "csv_invalid_rows": 0,
+}
+CSV_INGESTION_METRICS_LOCK = Lock()
+
 PORTFOLIO_SCAN_REQUIRED_COLUMNS_MESSAGE = (
     "We could not detect the required columns in your file.\n\n"
     "Required columns:\n"
@@ -1041,6 +1052,18 @@ def _normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
         used_names[normalized] = suffix + 1
         renamed[original] = target
     return df.rename(columns=renamed)
+
+
+def _increment_csv_metric(metric_name: str, increment: int = 1) -> None:
+    with CSV_INGESTION_METRICS_LOCK:
+        current = int(CSV_INGESTION_METRICS.get(metric_name, 0))
+        CSV_INGESTION_METRICS[metric_name] = current + increment
+
+
+def _ensure_csv_processing_time_budget(parse_started_at: float) -> None:
+    elapsed = time.perf_counter() - parse_started_at
+    if elapsed > CSV_PROCESSING_TIMEOUT_SECONDS:
+        raise HTTPException(status_code=400, detail={"error": "CSV processing timeout"})
 
 
 def _unwrap_line_wrapped_csv_text(text: str) -> str:
@@ -1124,8 +1147,14 @@ def _resolve_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
     return mapping
 
 
-def _coerce_required_float(raw_value: object, *, field_name: str, row_number: int) -> float:
+def _coerce_required_float(
+    raw_value: object,
+    *,
+    field_name: str,
+    row_number: int,
+) -> float:
     if raw_value is None or pd.isna(raw_value):
+        _increment_csv_metric("csv_invalid_rows")
         raise HTTPException(
             status_code=400,
             detail={"error": "Invalid required field value", "field": field_name, "row": row_number, "value": None},
@@ -1133,6 +1162,7 @@ def _coerce_required_float(raw_value: object, *, field_name: str, row_number: in
 
     normalized = str(raw_value).strip().lower()
     if not normalized:
+        _increment_csv_metric("csv_invalid_rows")
         raise HTTPException(
             status_code=400,
             detail={"error": "Invalid required field value", "field": field_name, "row": row_number, "value": str(raw_value)},
@@ -1140,6 +1170,7 @@ def _coerce_required_float(raw_value: object, *, field_name: str, row_number: in
 
     normalized = re.sub(r"[^0-9,.\-+]", "", normalized)
     if not normalized:
+        _increment_csv_metric("csv_invalid_rows")
         raise HTTPException(
             status_code=400,
             detail={"error": "Invalid required field value", "field": field_name, "row": row_number, "value": str(raw_value)},
@@ -1160,6 +1191,7 @@ def _coerce_required_float(raw_value: object, *, field_name: str, row_number: in
     try:
         value = float(normalized)
     except Exception:
+        _increment_csv_metric("csv_invalid_rows")
         raise HTTPException(
             status_code=400,
             detail={"error": "Invalid required field value", "field": field_name, "row": row_number, "value": str(raw_value)},
@@ -1172,12 +1204,14 @@ def _coerce_required_year(raw_value: object, *, row_number: int) -> int:
     value = _coerce_required_float(raw_value, field_name="installation_year", row_number=row_number)
     year = int(value)
     if not math.isclose(value, year, abs_tol=1e-6):
+        _increment_csv_metric("csv_invalid_rows")
         raise HTTPException(
             status_code=400,
             detail={"error": "Invalid required field value", "field": "installation_year", "row": row_number, "value": str(raw_value)},
         )
     current_year = datetime.now(timezone.utc).year + 1
     if year < 1900 or year > current_year:
+        _increment_csv_metric("csv_invalid_rows")
         raise HTTPException(
             status_code=400,
             detail={"error": "Invalid required field value", "field": "installation_year", "row": row_number, "value": str(raw_value)},
@@ -1239,13 +1273,28 @@ def _parse_installations_from_dataframe(
     company_id: str,
     alias_prefix: str,
     required_columns_error_message: Optional[str] = None,
+    parse_started_at: Optional[float] = None,
 ) -> List[Dict]:
+    if parse_started_at is not None:
+        _ensure_csv_processing_time_budget(parse_started_at)
+
     if df is None or df.empty:
         return []
 
     df = df.dropna(how="all")
     if df.empty:
         return []
+
+    if len(df.index) > CSV_MAX_ROWS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "CSV too large",
+                "details": {
+                    "max_rows": CSV_MAX_ROWS,
+                },
+            },
+        )
 
     df = _normalize_dataframe_columns(df)
     mapping = _resolve_column_mapping(df)
@@ -1275,14 +1324,18 @@ def _parse_installations_from_dataframe(
         )
 
     insert_payload: List[Dict] = []
-    for idx, row in df.iterrows():
-        row_number = idx + 2  # CSV/Excel with header row at line 1
+    for row_pos, (_, row) in enumerate(df.iterrows()):
+        if parse_started_at is not None and row_pos % 100 == 0:
+            _ensure_csv_processing_time_budget(parse_started_at)
+
+        row_number = row_pos + 2  # CSV/Excel with header row at line 1
         kwp = _coerce_required_float(
             row[mapping["system_size_kwp"]],
             field_name="system_size_kwp",
             row_number=row_number,
         )
         if kwp <= 0:
+            _increment_csv_metric("csv_invalid_rows")
             raise HTTPException(
                 status_code=400,
                 detail={"error": "Invalid required field value", "field": "system_size_kwp", "row": row_number, "value": str(row[mapping["system_size_kwp"]])},
@@ -1304,7 +1357,7 @@ def _parse_installations_from_dataframe(
         if name_col and pd.notna(row.get(name_col)):
             c_name = str(row[name_col]).strip()
 
-        client_alias = f"{alias_prefix}-{idx + 1:04d}"
+        client_alias = f"{alias_prefix}-{row_pos + 1:04d}"
         stable_id_source = f"{company_id}:{c_name}:{year}:{kwp}"
         stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, stable_id_source))
 
@@ -1336,6 +1389,7 @@ def _parse_installations_from_dataframe(
             }
         )
 
+    _increment_csv_metric("csv_valid_rows", len(insert_payload))
     return insert_payload
 
 
@@ -1346,14 +1400,17 @@ def _parse_installations_from_csv_bytes(
     alias_prefix: str,
     required_columns_error_message: Optional[str] = None,
 ) -> List[Dict]:
+    _increment_csv_metric("csv_total_uploads")
     if not csv_bytes:
         raise HTTPException(status_code=400, detail="CSV file is empty.")
 
+    parse_started_at = time.perf_counter()
     encodings = ("utf-8-sig", "utf-8", "latin-1")
     parse_error: Optional[Exception] = None
     df: Optional[pd.DataFrame] = None
 
     for encoding in encodings:
+        _ensure_csv_processing_time_budget(parse_started_at)
         try:
             text = csv_bytes.decode(encoding)
         except UnicodeDecodeError as decode_error:
@@ -1371,11 +1428,13 @@ def _parse_installations_from_csv_bytes(
 
         try:
             df = _attempt_csv_read(text, delimiter)
+            _ensure_csv_processing_time_budget(parse_started_at)
 
             # Fallback for malformed CSV exports where each full line is quoted.
             if _looks_like_single_column_csv(df):
                 unwrapped_text = _unwrap_line_wrapped_csv_text(text)
                 if unwrapped_text != text:
+                    columns_before = len(df.columns)
                     sample_unwrapped = unwrapped_text[:4096]
                     unwrapped_delimiter = delimiter
                     try:
@@ -1385,6 +1444,14 @@ def _parse_installations_from_csv_bytes(
                         if sample_unwrapped.count(";") > sample_unwrapped.count(","):
                             unwrapped_delimiter = ";"
                     df = _attempt_csv_read(unwrapped_text, unwrapped_delimiter)
+                    _increment_csv_metric("csv_malformed_detected")
+                    logger.warning(
+                        "CSV malformed detected -> fallback parser used columns_before=%s columns_after=%s rows=%s",
+                        columns_before,
+                        len(df.columns),
+                        len(df.index),
+                    )
+                    _ensure_csv_processing_time_budget(parse_started_at)
             break
         except Exception as read_error:
             parse_error = read_error
@@ -1401,6 +1468,7 @@ def _parse_installations_from_csv_bytes(
         company_id=company_id,
         alias_prefix=alias_prefix,
         required_columns_error_message=required_columns_error_message,
+        parse_started_at=parse_started_at,
     )
 
 
