@@ -67,7 +67,6 @@ from config import (
     STRIPE_SECRET_KEY, 
     RESEND_API_KEY, 
     ENVIRONMENT, 
-    ALLOWED_ORIGINS,
 )
 import resend
 import stripe
@@ -122,12 +121,6 @@ COUNTRY_TO_CURRENCY_FALLBACK: Dict[str, str] = {
     "CO": "COP",
     "CL": "CLP",
     "ES": "EUR",
-}
-
-PROD_ALLOWED_ORIGINS = {
-    "https://solvist-frontend.vercel.app",
-    "https://solvist.io",
-    "https://app.solvist.io",
 }
 
 IMPORT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
@@ -749,6 +742,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
 
+# CORS must be attached to the production app instance immediately after app init.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://solvist-frontend.vercel.app"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.state.limiter = limiter
 
 
@@ -774,22 +776,6 @@ def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse
 
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 app.add_middleware(SlowAPIMiddleware)
-
-if ENVIRONMENT == "production":
-    effective_allowed_origins = [origin for origin in ALLOWED_ORIGINS if origin in PROD_ALLOWED_ORIGINS]
-    if not effective_allowed_origins:
-        effective_allowed_origins = ["https://solvist-frontend.vercel.app"]
-else:
-    effective_allowed_origins = list(dict.fromkeys(ALLOWED_ORIGINS + ["http://localhost:3000", "http://127.0.0.1:3000"]))
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=effective_allowed_origins,
-    allow_origin_regex=None,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 @app.post("/api/engine/score-all")
 @limiter.limit("5/minute")
@@ -891,6 +877,16 @@ def get_recontact_opportunities(request: Request, tenant: Tenant):
 async def audit_middleware(request: Request, call_next):
     start = datetime.now(timezone.utc)
     request_id = _request_id_for(request)
+    origin = request.headers.get("origin", "")
+
+    if request.url.path in {"/api/public/portfolio-scan", "/portfolio-scan"} or request.method == "OPTIONS":
+        logger.info(
+            "CORS_DEBUG inbound request_id=%s method=%s path=%s origin=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            origin,
+        )
 
     try:
         response = await call_next(request)
@@ -918,6 +914,14 @@ async def audit_middleware(request: Request, call_next):
         response.status_code,
         duration_ms,
     )
+
+    if request.url.path in {"/api/public/portfolio-scan", "/portfolio-scan"} or request.method == "OPTIONS":
+        logger.info(
+            "CORS_DEBUG outbound request_id=%s status=%s allow_origin=%s",
+            request_id,
+            response.status_code,
+            response.headers.get("access-control-allow-origin", ""),
+        )
 
     if tenant and request.url.path.startswith("/api"):
         log_entry = {
@@ -1475,6 +1479,7 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
         raise HTTPException(status_code=500, detail="Error processing CSV.")
 
 
+@app.post("/portfolio-scan")
 @app.post("/api/public/portfolio-scan")
 @limiter.limit("10/minute")
 async def public_portfolio_scan(
@@ -1484,7 +1489,11 @@ async def public_portfolio_scan(
 ):
     filename = (file.filename or "").lower() if file else ""
     google_sheet_url = (google_sheet_url or "").strip()
-    logger.info(f"Public portfolio scan triggered from {request.client.host if request.client else 'unknown'}")
+    logger.info(
+        "Public portfolio scan hit origin=%s ip=%s",
+        request.headers.get("origin", ""),
+        request.client.host if request.client else "unknown",
+    )
 
     if not file and not google_sheet_url:
         raise HTTPException(
