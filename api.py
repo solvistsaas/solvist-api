@@ -336,6 +336,30 @@ async def get_auth_context(
 
 AuthTenant = Annotated[TenantContext, Depends(get_auth_context)]
 
+
+async def get_internal_metrics_auth(
+    request: Request,
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
+) -> TenantContext:
+    token = _extract_authorization_bearer(request, credentials)
+    engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
+
+    if engine_secret and secrets.compare_digest(token, engine_secret):
+        tenant = TenantContext(
+            user_id="engine_service",
+            company_id="internal_metrics",
+            jwt="",
+            installation_limit=0,
+        )
+        request.state.tenant = tenant
+        return tenant
+
+    jwt_credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+    return await get_tenant(request, jwt_credentials)
+
+
+InternalMetricsTenant = Annotated[TenantContext, Depends(get_internal_metrics_auth)]
+
 class LocationTypeEnum(str, Enum):
     residential = "residential"
     industrial = "industrial"
@@ -1058,6 +1082,16 @@ def _increment_csv_metric(metric_name: str, increment: int = 1) -> None:
     with CSV_INGESTION_METRICS_LOCK:
         current = int(CSV_INGESTION_METRICS.get(metric_name, 0))
         CSV_INGESTION_METRICS[metric_name] = current + increment
+
+
+def _get_csv_ingestion_metrics_snapshot() -> Dict[str, int]:
+    with CSV_INGESTION_METRICS_LOCK:
+        return {
+            "csv_total_uploads": int(CSV_INGESTION_METRICS.get("csv_total_uploads", 0)),
+            "csv_malformed_detected": int(CSV_INGESTION_METRICS.get("csv_malformed_detected", 0)),
+            "csv_valid_rows": int(CSV_INGESTION_METRICS.get("csv_valid_rows", 0)),
+            "csv_invalid_rows": int(CSV_INGESTION_METRICS.get("csv_invalid_rows", 0)),
+        }
 
 
 def _ensure_csv_processing_time_budget(parse_started_at: float) -> None:
@@ -3125,6 +3159,13 @@ def import_status(request: Request, tenant: AuthTenant):
         "last_import_duration": float(LAST_IMPORT_STATUS.get("last_import_duration", 0.0)),
         "last_import_opportunities": int(LAST_IMPORT_STATUS.get("last_import_opportunities", 0)),
     }
+
+
+@app.get("/internal/metrics/csv", include_in_schema=False)
+@limiter.limit("30/minute")
+def internal_csv_metrics(request: Request, tenant: InternalMetricsTenant):
+    logger.info("CSV metrics accessed")
+    return _get_csv_ingestion_metrics_snapshot()
 
 
 @app.get("/health/pipeline")
