@@ -986,11 +986,203 @@ PORTFOLIO_SCAN_REQUIRED_COLUMNS_MESSAGE = (
 )
 
 
-def _find_first_column(df: pd.DataFrame, aliases: List[str]) -> Optional[str]:
-    for alias in aliases:
-        if alias in df.columns:
-            return alias
-    return None
+REQUIRED_CANONICAL_FIELDS = ("system_size_kwp", "installation_year")
+
+# Canonical CSV schema aliases. First matching column is selected.
+CANONICAL_COLUMN_ALIASES: Dict[str, List[str]] = {
+    "system_size_kwp": [
+        "system_size_kwp",
+        "kwp",
+        "size_kwp",
+        "system_size",
+        "installed_kwp",
+        "power_kwp",
+    ],
+    "installation_year": [
+        "installation_year",
+        "year",
+        "install_year",
+        "installed_year",
+        "commissioning_year",
+        "commission_year",
+        "installationdate",
+    ],
+    "country": ["country", "region", "location", "country_code"],
+    "has_battery": ["has_battery", "battery", "battery_installed", "with_battery"],
+    "inverter_model": ["inverter_model", "inverter_brand", "inverter", "inverter_model_name"],
+    "location_type": ["location_type", "client_type", "type", "sector"],
+    "client_name": ["client_name", "name", "customer", "client"],
+    "tariff_type": ["tariff_type", "tariff", "rate_type"],
+    "estimated_consumption": ["estimated_consumption", "consumption_kwh", "annual_consumption", "consumption"],
+    "dc_ac_ratio": ["dc_ac_ratio", "dcac_ratio", "dcac"],
+    "has_maintenance_contract": ["has_maintenance_contract", "maintenance_contract", "with_maintenance"],
+}
+
+
+def _normalize_column_name(raw_name: object) -> str:
+    name = str(raw_name or "").strip().lower()
+    name = re.sub(r"[^\w]+", "_", name)
+    name = re.sub(r"_+", "_", name).strip("_")
+    return name
+
+
+def _normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    renamed: Dict[str, str] = {}
+    used_names: Dict[str, int] = {}
+    for original in df.columns:
+        normalized = _normalize_column_name(original)
+        if not normalized:
+            normalized = "column"
+        suffix = used_names.get(normalized, 0)
+        if suffix > 0:
+            target = f"{normalized}_{suffix}"
+        else:
+            target = normalized
+        used_names[normalized] = suffix + 1
+        renamed[original] = target
+    return df.rename(columns=renamed)
+
+
+def _unwrap_line_wrapped_csv_text(text: str) -> str:
+    """
+    Some exports quote the entire row as a single CSV field:
+    "col1,col2,col3"
+    "v1,v2,v3"
+    This unwraps only that malformed format while leaving valid CSV untouched.
+    """
+    lines = text.splitlines()
+    if not lines:
+        return text
+
+    unwrapped_lines: List[str] = []
+    wrapped_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith('"') and stripped.endswith('"') and '","' not in stripped:
+            candidate = stripped[1:-1]
+            # Keep only plausible CSV-like rows.
+            if any(delim in candidate for delim in [",", ";", "|", "\t"]):
+                unwrapped_lines.append(candidate)
+                wrapped_count += 1
+                continue
+
+        unwrapped_lines.append(stripped)
+
+    if wrapped_count == 0:
+        return text
+
+    return "\n".join(unwrapped_lines)
+
+
+def _attempt_csv_read(text: str, delimiter: str) -> pd.DataFrame:
+    return pd.read_csv(
+        io.StringIO(text),
+        sep=delimiter,
+        skipinitialspace=True,
+        engine="python",
+    )
+
+
+def _looks_like_single_column_csv(df: pd.DataFrame) -> bool:
+    if df is None or df.empty:
+        return False
+    if len(df.columns) != 1:
+        return False
+
+    only_col = str(df.columns[0])
+    if any(delim in only_col for delim in [",", ";", "|", "\t"]):
+        return True
+
+    sample_values = df.iloc[:, 0].dropna().astype(str).head(10).tolist()
+    return any(any(delim in value for delim in [",", ";", "|", "\t"]) for value in sample_values)
+
+
+def _resolve_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    detected_columns = list(df.columns)
+    logger.info("CSV columns detected: %s", detected_columns)
+
+    for canonical, aliases in CANONICAL_COLUMN_ALIASES.items():
+        source_column: Optional[str] = None
+        for alias in aliases:
+            normalized_alias = _normalize_column_name(alias)
+            if normalized_alias in df.columns:
+                source_column = normalized_alias
+                break
+        if source_column:
+            mapping[canonical] = source_column
+            logger.info("Mapped %s -> %s", canonical, source_column)
+
+    for required_field in REQUIRED_CANONICAL_FIELDS:
+        if required_field not in mapping:
+            logger.warning("Missing %s", required_field)
+
+    return mapping
+
+
+def _coerce_required_float(raw_value: object, *, field_name: str, row_number: int) -> float:
+    if raw_value is None or pd.isna(raw_value):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid required field value", "field": field_name, "row": row_number, "value": None},
+        )
+
+    normalized = str(raw_value).strip().lower()
+    if not normalized:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid required field value", "field": field_name, "row": row_number, "value": str(raw_value)},
+        )
+
+    normalized = re.sub(r"[^0-9,.\-+]", "", normalized)
+    if not normalized:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid required field value", "field": field_name, "row": row_number, "value": str(raw_value)},
+        )
+
+    if normalized.count(",") == 1 and normalized.count(".") == 0:
+        normalized = normalized.replace(",", ".")
+    elif normalized.count(",") > 0 and normalized.count(".") > 0:
+        if normalized.rfind(",") > normalized.rfind("."):
+            normalized = normalized.replace(".", "").replace(",", ".")
+        else:
+            normalized = normalized.replace(",", "")
+    elif normalized.count(",") > 1 and normalized.count(".") == 0:
+        normalized = normalized.replace(",", "")
+    elif normalized.count(".") > 1 and normalized.count(",") == 0:
+        normalized = normalized.replace(".", "")
+
+    try:
+        value = float(normalized)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid required field value", "field": field_name, "row": row_number, "value": str(raw_value)},
+        )
+
+    return value
+
+
+def _coerce_required_year(raw_value: object, *, row_number: int) -> int:
+    value = _coerce_required_float(raw_value, field_name="installation_year", row_number=row_number)
+    year = int(value)
+    if not math.isclose(value, year, abs_tol=1e-6):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid required field value", "field": "installation_year", "row": row_number, "value": str(raw_value)},
+        )
+    current_year = datetime.now(timezone.utc).year + 1
+    if year < 1900 or year > current_year:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "Invalid required field value", "field": "installation_year", "row": row_number, "value": str(raw_value)},
+        )
+    return year
 
 
 def _parse_bool_value(raw_value: object, default: bool = False) -> bool:
@@ -1055,106 +1247,92 @@ def _parse_installations_from_dataframe(
     if df.empty:
         return []
 
-    # Normalize column names
-    columns_lower = {col: str(col).lower().strip() for col in df.columns}
-    df.rename(columns=columns_lower, inplace=True)
+    df = _normalize_dataframe_columns(df)
+    mapping = _resolve_column_mapping(df)
 
-    kwp_aliases = [
-        "system_size_kwp",
-        "kwp",
-        "system_size",
-        "size_kwp",
-        "installed_kwp",
-        "power_kwp",
-        "system size (kwp)",
-        "system size kwp",
-    ]
-    year_aliases = [
-        "installation_year",
-        "installation year",
-        "year",
-        "installed_year",
-        "commission_year",
-    ]
-    location_aliases = ["location_type", "client_type", "type", "sector"]
-    name_aliases = ["client_name", "client name", "name", "customer", "client"]
-    battery_aliases = ["has_battery", "battery", "battery_installed", "with_battery"]
-    tariff_aliases = ["tariff_type", "tariff", "rate_type"]
-    consumption_aliases = ["estimated_consumption", "consumption_kwh", "annual_consumption", "consumption"]
-    dcac_aliases = ["dc_ac_ratio", "dcac_ratio", "dcac"]
-    maintenance_aliases = ["has_maintenance_contract", "maintenance_contract", "with_maintenance"]
-    country_aliases = ["country", "region", "location"]
-    inverter_aliases = ["inverter_model", "inverter brand", "inverter_brand", "inverter"]
-
-    kwp_col = _find_first_column(df, kwp_aliases)
-    year_col = _find_first_column(df, year_aliases)
-    location_col = _find_first_column(df, location_aliases)
-    name_col = _find_first_column(df, name_aliases)
-    battery_col = _find_first_column(df, battery_aliases)
-    tariff_col = _find_first_column(df, tariff_aliases)
-    consumption_col = _find_first_column(df, consumption_aliases)
-    dcac_col = _find_first_column(df, dcac_aliases)
-    maintenance_col = _find_first_column(df, maintenance_aliases)
-    country_col = _find_first_column(df, country_aliases)
-    inverter_col = _find_first_column(df, inverter_aliases)
-
-    if not kwp_col or not year_col:
-        required_columns_display = ["System Size (kWp)", "Installation Year"]
-        required_columns_normalized = [col.lower() for col in required_columns_display]
-        missing = [
-            display
-            for display, normalized in zip(required_columns_display, required_columns_normalized)
-            if normalized not in df.columns
-        ]
-        if len(missing) == len(required_columns_display):
+    missing_required = {
+        "system_size_kwp": "system_size_kwp" not in mapping,
+        "installation_year": "installation_year" not in mapping,
+    }
+    if missing_required["system_size_kwp"] or missing_required["installation_year"]:
+        if required_columns_error_message:
             raise HTTPException(
                 status_code=400,
                 detail={
                     "error": "Missing required columns",
-                    "required_any_of": required_columns_display,
+                    "message": required_columns_error_message,
+                    "details": missing_required,
                     "columns_detected": list(df.columns),
                 },
             )
-
-        detail = (
-            required_columns_error_message
-            or "Missing required columns: System Size (kWp) or Installation Year"
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Missing required columns",
+                "details": missing_required,
+                "columns_detected": list(df.columns),
+            },
         )
-        raise HTTPException(status_code=400, detail=detail)
 
     insert_payload: List[Dict] = []
     for idx, row in df.iterrows():
-        kwp = _parse_float_value(row[kwp_col], float("nan"))
-        year_float = _parse_float_value(row[year_col], float("nan"))
-        if pd.isna(kwp) or pd.isna(year_float):
-            continue
-        year = int(year_float)
-        if year < 1900 or year > (datetime.now(timezone.utc).year + 1):
-            continue
+        row_number = idx + 2  # CSV/Excel with header row at line 1
+        kwp = _coerce_required_float(
+            row[mapping["system_size_kwp"]],
+            field_name="system_size_kwp",
+            row_number=row_number,
+        )
+        if kwp <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "Invalid required field value", "field": "system_size_kwp", "row": row_number, "value": str(row[mapping["system_size_kwp"]])},
+            )
+
+        year = _coerce_required_year(row[mapping["installation_year"]], row_number=row_number)
+
+        name_col = mapping.get("client_name")
+        location_col = mapping.get("location_type")
+        battery_col = mapping.get("has_battery")
+        tariff_col = mapping.get("tariff_type")
+        consumption_col = mapping.get("estimated_consumption")
+        dcac_col = mapping.get("dc_ac_ratio")
+        maintenance_col = mapping.get("has_maintenance_contract")
+        country_col = mapping.get("country")
+        inverter_col = mapping.get("inverter_model")
 
         c_name = "Unknown Client"
-        if name_col and pd.notna(row[name_col]):
+        if name_col and pd.notna(row.get(name_col)):
             c_name = str(row[name_col]).strip()
 
         client_alias = f"{alias_prefix}-{idx + 1:04d}"
         stable_id_source = f"{company_id}:{c_name}:{year}:{kwp}"
         stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, stable_id_source))
+
+        canonical_row = {
+            "system_size_kwp": float(kwp),
+            "installation_year": int(year),
+            "country": str(row[country_col]).strip() if country_col and pd.notna(row[country_col]) else "Unknown",
+            "has_battery": _parse_bool_value(row[battery_col], False) if battery_col else False,
+            "inverter_model": str(row[inverter_col]).strip() if inverter_col and pd.notna(row[inverter_col]) else "Unknown",
+        }
+
         insert_payload.append(
             {
                 "id": stable_id,
                 "company_id": company_id,
                 "client_name": c_name,
                 "client_alias": client_alias,
-                "kwp": kwp,
-                "installation_year": year,
-                "inverter_model": str(row[inverter_col]).strip() if inverter_col and pd.notna(row[inverter_col]) else "Unknown",
+                # Keep existing storage schema while parsing via canonical schema.
+                "kwp": canonical_row["system_size_kwp"],
+                "installation_year": canonical_row["installation_year"],
+                "inverter_model": canonical_row["inverter_model"],
                 "location_type": _normalize_location_type(row[location_col]) if location_col else "residential",
-                "has_battery": _parse_bool_value(row[battery_col], False) if battery_col else False,
+                "has_battery": canonical_row["has_battery"],
                 "tariff_type": str(row[tariff_col]).strip().lower() if tariff_col and pd.notna(row[tariff_col]) else "standard",
                 "estimated_consumption": _parse_float_value(row[consumption_col], 0.0) if consumption_col else 0.0,
                 "dc_ac_ratio": _parse_float_value(row[dcac_col], 1.0) if dcac_col else 1.0,
                 "has_maintenance_contract": _parse_bool_value(row[maintenance_col], False) if maintenance_col else False,
-                "country": str(row[country_col]).strip() if country_col and pd.notna(row[country_col]) else "Unknown",
+                "country": canonical_row["country"],
             }
         )
 
@@ -1192,7 +1370,21 @@ def _parse_installations_from_csv_bytes(
                 delimiter = ";"
 
         try:
-            df = pd.read_csv(io.StringIO(text), sep=delimiter, skipinitialspace=True, engine="python")
+            df = _attempt_csv_read(text, delimiter)
+
+            # Fallback for malformed CSV exports where each full line is quoted.
+            if _looks_like_single_column_csv(df):
+                unwrapped_text = _unwrap_line_wrapped_csv_text(text)
+                if unwrapped_text != text:
+                    sample_unwrapped = unwrapped_text[:4096]
+                    unwrapped_delimiter = delimiter
+                    try:
+                        sniffed_unwrapped = csv.Sniffer().sniff(sample_unwrapped, delimiters=",;|\t")
+                        unwrapped_delimiter = sniffed_unwrapped.delimiter
+                    except Exception:
+                        if sample_unwrapped.count(";") > sample_unwrapped.count(","):
+                            unwrapped_delimiter = ";"
+                    df = _attempt_csv_read(unwrapped_text, unwrapped_delimiter)
             break
         except Exception as read_error:
             parse_error = read_error
@@ -1232,7 +1424,7 @@ def _parse_installations_from_excel_bytes(
             if value is None:
                 headers.append(f"column_{idx}")
                 continue
-            header = str(value).strip().lower()
+            header = _normalize_column_name(value)
             headers.append(header or f"column_{idx}")
 
         records: List[Dict] = []
