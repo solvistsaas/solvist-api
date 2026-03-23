@@ -69,10 +69,74 @@ from config import (
     RESEND_API_KEY, 
     ENVIRONMENT, 
 )
+from jose import jwt as jose_jwt, JWTError
 import resend
 import stripe
 import psycopg2
 from db import get_db_connection
+
+# ─── Supabase JWT local verification ──────────────────────────────────────────
+_raw_jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "")
+SUPABASE_JWT_SECRET = _raw_jwt_secret.strip().strip('"').strip("'").strip()
+if not SUPABASE_JWT_SECRET:
+    logging.getLogger("solvist").error(
+        "SUPABASE_JWT_SECRET not set — ALL authenticated requests will be rejected."
+    )
+else:
+    logging.getLogger("solvist").info(
+        "SUPABASE_JWT_SECRET loaded (length=%d, first6=%s)",
+        len(SUPABASE_JWT_SECRET),
+        SUPABASE_JWT_SECRET[:6] + "...",
+    )
+
+
+def verify_supabase_token(token: str) -> dict:
+    """Decode and validate a Supabase JWT locally. No Supabase API calls."""
+    if not SUPABASE_JWT_SECRET:
+        print("AUTH FATAL: SUPABASE_JWT_SECRET is not configured")
+        raise HTTPException(status_code=500, detail="Server authentication not configured.")
+
+    try:
+        unverified_header = jose_jwt.get_unverified_header(token)
+        unverified_claims = jose_jwt.get_unverified_claims(token)
+        print("JWT DEBUG HEADER:", unverified_header)
+        print("JWT DEBUG CLAIMS:", {
+            "sub": unverified_claims.get("sub"),
+            "aud": unverified_claims.get("aud"),
+            "iss": unverified_claims.get("iss"),
+            "role": unverified_claims.get("role"),
+            "exp": unverified_claims.get("exp"),
+        })
+    except Exception as e:
+        print("JWT DEBUG PARSE ERROR:", str(e))
+
+    for attempt, options in enumerate([
+        {"audience": "authenticated"},
+        {},
+    ]):
+        try:
+            payload = jose_jwt.decode(
+                token,
+                SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                options={"verify_aud": bool(options.get("audience"))},
+                **options,
+            )
+            print("TOKEN VERIFIED", {
+                "user_id": payload.get("sub"),
+                "email": payload.get("email"),
+                "aud": payload.get("aud"),
+                "attempt": attempt,
+            })
+            return payload
+        except JWTError as e:
+            if attempt == 0:
+                print(f"JWT DECODE ATTEMPT {attempt} FAILED (audience check): {str(e)}")
+                continue
+            print(f"JWT DECODE FAILED: {str(e)}")
+            raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+    raise HTTPException(status_code=401, detail="Invalid token")
+
 
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
@@ -155,11 +219,9 @@ async def get_tenant(
         raise HTTPException(status_code=401, detail="Missing Authorization header.")
 
     token = credentials.credentials
-    try:
-        auth_response = admin_client.auth.get_user(token)
-        user_id = auth_response.user.id
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token.")
+    logger.info("AUTH PATCH CONFIRMED")
+    payload = verify_supabase_token(token)
+    user_id = payload["sub"]
 
     db = scoped_client(token)
     try:
@@ -291,11 +353,8 @@ async def get_import_tenant(
         request.state.tenant = tenant
         return tenant
 
-    try:
-        auth_response = admin_client.auth.get_user(token)
-        user_id = auth_response.user.id
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    payload = verify_supabase_token(token)
+    user_id = payload["sub"]
 
     db = scoped_client(token)
     try:
