@@ -63,59 +63,31 @@ from scoring.engine import (
 )
 from config import (
     SUPABASE_URL, 
-    SUPABASE_ANON_KEY,
-    SUPABASE_SERVICE_ROLE_KEY, 
+    SUPABASE_SERVICE_KEY,
     STRIPE_SECRET_KEY, 
     RESEND_API_KEY, 
     ENVIRONMENT, 
     ALLOWED_ORIGINS,
 )
-from jose import jwt as jose_jwt, JWTError
 import resend
 import stripe
 import psycopg2
 from db import get_db_connection
 
-# ─── Supabase JWT local verification ──────────────────────────────────────────
-_raw_jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "")
-SUPABASE_JWT_SECRET = _raw_jwt_secret.strip().strip('"').strip("'").strip()
-if not SUPABASE_JWT_SECRET:
-    logging.getLogger("solvist").error(
-        "SUPABASE_JWT_SECRET not set — ALL authenticated requests will be rejected."
-    )
-else:
-    logging.getLogger("solvist").info(
-        "SUPABASE_JWT_SECRET loaded (length=%d).",
-        len(SUPABASE_JWT_SECRET),
-    )
-
-
 def verify_supabase_token(token: str) -> dict:
-    """Decode and validate a Supabase JWT locally. No Supabase API calls."""
-    if not SUPABASE_JWT_SECRET:
-        logger.error("AUTH FATAL: SUPABASE_JWT_SECRET is not configured")
+    """Validate Supabase JWT against Supabase Auth API using service key."""
+    if not admin_client:
         raise HTTPException(status_code=500, detail="Server authentication not configured.")
-
-    for attempt, options in enumerate([
-        {"audience": "authenticated"},
-        {},
-    ]):
-        try:
-            payload = jose_jwt.decode(
-                token,
-                SUPABASE_JWT_SECRET,
-                algorithms=["HS256"],
-                options={"verify_aud": bool(options.get("audience"))},
-                **options,
-            )
-            return payload
-        except JWTError as e:
-            if attempt == 0:
-                logger.debug("JWT decode attempt with audience failed: %s", str(e))
-                continue
-            logger.info("JWT decode failed.")
+    try:
+        user_res = admin_client.auth.get_user(token)
+        user = getattr(user_res, "user", None)
+        if not user or not getattr(user, "id", None):
             raise HTTPException(status_code=401, detail="Invalid token.")
-    raise HTTPException(status_code=401, detail="Invalid token")
+        return {"sub": str(user.id), "email": getattr(user, "email", None)}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token.")
 
 
 if STRIPE_SECRET_KEY:
@@ -524,7 +496,7 @@ def build_sales_email_draft(client: Dict) -> Dict[str, str]:
 
 def scoped_client(jwt: str) -> Client:
     """Creates a per-request client with the user's JWT (activates RLS auth.uid())."""
-    client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     client.postgrest.auth(jwt)
     return client
 
@@ -553,7 +525,7 @@ def core_score_all_installations():
 
     try:
         # Fresh admin client to avoid stale schema cache
-        fresh_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        fresh_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
         # PREP FOR BLOCK 1: Set calculated_month to first day of current month
         calculated_month = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -788,7 +760,7 @@ scheduler = BackgroundScheduler()
 async def lifespan(app: FastAPI):
     # FIX #3: Initialize Supabase admin client at startup, not at module import time
     global admin_client
-    admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     logger.info("Supabase admin client initialized.")
 
     # FIX #2: Validate ENGINE_SECRET at startup (warn only — don't crash the server)
