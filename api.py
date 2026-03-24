@@ -63,11 +63,12 @@ from scoring.engine import (
 )
 from config import (
     SUPABASE_URL, 
-    SUPABASE_ANON_KEY, 
-    SUPABASE_SERVICE_KEY, 
+    SUPABASE_ANON_KEY,
+    SUPABASE_SERVICE_ROLE_KEY, 
     STRIPE_SECRET_KEY, 
     RESEND_API_KEY, 
     ENVIRONMENT, 
+    ALLOWED_ORIGINS,
 )
 from jose import jwt as jose_jwt, JWTError
 import resend
@@ -84,31 +85,16 @@ if not SUPABASE_JWT_SECRET:
     )
 else:
     logging.getLogger("solvist").info(
-        "SUPABASE_JWT_SECRET loaded (length=%d, first6=%s)",
+        "SUPABASE_JWT_SECRET loaded (length=%d).",
         len(SUPABASE_JWT_SECRET),
-        SUPABASE_JWT_SECRET[:6] + "...",
     )
 
 
 def verify_supabase_token(token: str) -> dict:
     """Decode and validate a Supabase JWT locally. No Supabase API calls."""
     if not SUPABASE_JWT_SECRET:
-        print("AUTH FATAL: SUPABASE_JWT_SECRET is not configured")
+        logger.error("AUTH FATAL: SUPABASE_JWT_SECRET is not configured")
         raise HTTPException(status_code=500, detail="Server authentication not configured.")
-
-    try:
-        unverified_header = jose_jwt.get_unverified_header(token)
-        unverified_claims = jose_jwt.get_unverified_claims(token)
-        print("JWT DEBUG HEADER:", unverified_header)
-        print("JWT DEBUG CLAIMS:", {
-            "sub": unverified_claims.get("sub"),
-            "aud": unverified_claims.get("aud"),
-            "iss": unverified_claims.get("iss"),
-            "role": unverified_claims.get("role"),
-            "exp": unverified_claims.get("exp"),
-        })
-    except Exception as e:
-        print("JWT DEBUG PARSE ERROR:", str(e))
 
     for attempt, options in enumerate([
         {"audience": "authenticated"},
@@ -122,19 +108,13 @@ def verify_supabase_token(token: str) -> dict:
                 options={"verify_aud": bool(options.get("audience"))},
                 **options,
             )
-            print("TOKEN VERIFIED", {
-                "user_id": payload.get("sub"),
-                "email": payload.get("email"),
-                "aud": payload.get("aud"),
-                "attempt": attempt,
-            })
             return payload
         except JWTError as e:
             if attempt == 0:
-                print(f"JWT DECODE ATTEMPT {attempt} FAILED (audience check): {str(e)}")
+                logger.debug("JWT decode attempt with audience failed: %s", str(e))
                 continue
-            print(f"JWT DECODE FAILED: {str(e)}")
-            raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+            logger.info("JWT decode failed.")
+            raise HTTPException(status_code=401, detail="Invalid token.")
     raise HTTPException(status_code=401, detail="Invalid token")
 
 
@@ -219,24 +199,22 @@ async def get_tenant(
         raise HTTPException(status_code=401, detail="Missing Authorization header.")
 
     token = credentials.credentials
-    logger.info("AUTH PATCH CONFIRMED")
     payload = verify_supabase_token(token)
     user_id = payload["sub"]
 
     db = scoped_client(token)
     try:
         res_user = db.table("users").select("company_id").eq("id", user_id).single().execute()
-        company_id = res_user.data.get("company_id")
+        company_id = (res_user.data or {}).get("company_id")
     except Exception:
         raise HTTPException(status_code=403, detail="User not registered.")
 
     if not company_id:
         raise HTTPException(status_code=403, detail="User has no company.")
 
-    # Fetch installation limit from companies (RLS applies or fallback to admin query if needed)
+    # Fetch installation limit from tenant-scoped context.
     try:
-        # Service role to fetch plan limits (companies RLS might be strict)
-        res_comp = admin_client.table("companies").select("installation_limit").eq("id", company_id).single().execute()
+        res_comp = db.table("companies").select("installation_limit").eq("id", company_id).single().execute()
         max_inst = res_comp.data.get("installation_limit") or 500
     except Exception:
         max_inst = 500
@@ -308,12 +286,12 @@ def _extract_authorization_bearer(
     equals_engine = bool(engine_secret) and secrets.compare_digest(token, engine_secret)
 
     # Temporary auth diagnostics for production debugging.
-    logger.info("AUTH HEADER: %s", masked_header)
-    logger.info("PARSED SCHEME: %s", scheme)
-    logger.info("TOKEN RECEIVED: %s", _mask_value(token))
-    logger.info("ENGINE_SECRET LENGTH: %s", len(engine_secret))
-    logger.info("TOKEN LENGTH: %s", len(token))
-    logger.info("TOKEN_EQUALS_ENGINE_SECRET: %s", equals_engine)
+    logger.debug("AUTH HEADER: %s", masked_header)
+    logger.debug("PARSED SCHEME: %s", scheme)
+    logger.debug("TOKEN RECEIVED: %s", _mask_value(token))
+    logger.debug("ENGINE_SECRET LENGTH: %s", len(engine_secret))
+    logger.debug("TOKEN LENGTH: %s", len(token))
+    logger.debug("TOKEN_EQUALS_ENGINE_SECRET: %s", equals_engine)
     return token
 
 
@@ -359,7 +337,7 @@ async def get_import_tenant(
     db = scoped_client(token)
     try:
         res_user = db.table("users").select("company_id").eq("id", user_id).single().execute()
-        company_id = res_user.data.get("company_id")
+        company_id = (res_user.data or {}).get("company_id")
     except Exception:
         raise HTTPException(status_code=403, detail="User not registered.")
 
@@ -368,7 +346,7 @@ async def get_import_tenant(
 
     try:
         res_comp = (
-            admin_client.table("companies")
+            db.table("companies")
             .select("installation_limit")
             .eq("id", company_id)
             .single()
@@ -424,7 +402,7 @@ class LocationTypeEnum(str, Enum):
     industrial = "industrial"
 
 class InstallationCreate(BaseModel):
-    client_name: str
+    client_alias: Optional[str] = None
     installation_year: int
     kwp: float
     inverter_model: str = "Unknown"
@@ -575,7 +553,7 @@ def core_score_all_installations():
 
     try:
         # Fresh admin client to avoid stale schema cache
-        fresh_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        fresh_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
         # PREP FOR BLOCK 1: Set calculated_month to first day of current month
         calculated_month = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -810,7 +788,7 @@ scheduler = BackgroundScheduler()
 async def lifespan(app: FastAPI):
     # FIX #3: Initialize Supabase admin client at startup, not at module import time
     global admin_client
-    admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     logger.info("Supabase admin client initialized.")
 
     # FIX #2: Validate ENGINE_SECRET at startup (warn only — don't crash the server)
@@ -829,7 +807,7 @@ app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespa
 # CORS must be attached to the production app instance immediately after app init.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://solvist-frontend.vercel.app"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1106,6 +1084,7 @@ CANONICAL_COLUMN_ALIASES: Dict[str, List[str]] = {
     "inverter_model": ["inverter_model", "inverter_brand", "inverter", "inverter_model_name"],
     "location_type": ["location_type", "client_type", "type", "sector"],
     "client_name": ["client_name", "name", "customer", "client"],
+    "client_alias": ["client_alias", "alias", "client_id"],
     "tariff_type": ["tariff_type", "tariff", "rate_type"],
     "estimated_consumption": ["estimated_consumption", "consumption_kwh", "annual_consumption", "consumption"],
     "dc_ac_ratio": ["dc_ac_ratio", "dcac_ratio", "dcac"],
@@ -1436,7 +1415,7 @@ def _parse_installations_from_dataframe(
 
         year = _coerce_required_year(row[mapping["installation_year"]], row_number=row_number)
 
-        name_col = mapping.get("client_name")
+        alias_col = mapping.get("client_alias")
         location_col = mapping.get("location_type")
         battery_col = mapping.get("has_battery")
         tariff_col = mapping.get("tariff_type")
@@ -1446,12 +1425,12 @@ def _parse_installations_from_dataframe(
         country_col = mapping.get("country")
         inverter_col = mapping.get("inverter_model")
 
-        c_name = "Unknown Client"
-        if name_col and pd.notna(row.get(name_col)):
-            c_name = str(row[name_col]).strip()
-
-        client_alias = f"{alias_prefix}-{row_pos + 1:04d}"
-        stable_id_source = f"{company_id}:{c_name}:{year}:{kwp}"
+        client_alias = (
+            str(row[alias_col]).strip()
+            if alias_col and pd.notna(row.get(alias_col)) and str(row[alias_col]).strip()
+            else f"{alias_prefix}-{row_pos + 1:04d}"
+        )
+        stable_id_source = f"{company_id}:{client_alias}:{year}:{kwp}"
         stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, stable_id_source))
 
         canonical_row = {
@@ -1466,7 +1445,6 @@ def _parse_installations_from_dataframe(
             {
                 "id": stable_id,
                 "company_id": company_id,
-                "client_name": c_name,
                 "client_alias": client_alias,
                 # Keep existing storage schema while parsing via canonical schema.
                 "kwp": canonical_row["system_size_kwp"],
@@ -1739,14 +1717,15 @@ def create_installation(
     db = scoped_client(tenant.jwt)
 
     # Enforce plan limits
-    count_res = admin_client.table("installations").select("id", count="exact").eq("company_id", tenant.company_id).execute()
+    count_res = db.table("installations").select("id", count="exact").eq("company_id", tenant.company_id).execute()
     current_count = count_res.count if hasattr(count_res, "count") and count_res.count is not None else len(count_res.data)
 
     if current_count >= tenant.installation_limit:
         raise HTTPException(status_code=402, detail=f"Plan limit exceeded. Max: {tenant.installation_limit}")
 
     # Pydantic implicitly formats Enums (payload.dict() calls their .value during JSON serialization via fastapi by default, or explicit mapping)
-    data = payload.dict()
+    data = payload.dict(exclude_none=True)
+    data.pop("client_alias", None)
     data["location_type"] = payload.location_type.value
     data["company_id"] = tenant.company_id
     res = db.table("installations").insert(data).execute()
@@ -1767,7 +1746,7 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
     try:
         content = await file.read()
         if len(content) > IMPORT_MAX_FILE_SIZE_BYTES:
-            raise HTTPException(status_code=413, detail="File too large. Maximum allowed size is 5MB.")
+            raise HTTPException(status_code=413, detail="File too large. Maximum allowed size is 10MB.")
 
         insert_payload = _parse_installations_from_csv_bytes(
             content,
@@ -1782,7 +1761,7 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
             raise HTTPException(status_code=400, detail="No valid installations found in CSV")
             
         # Check plan limit
-        count_res = admin_client.table("installations").select("id", count="exact").eq("company_id", tenant.company_id).execute()
+        count_res = db.table("installations").select("id", count="exact").eq("company_id", tenant.company_id).execute()
         current_count = count_res.count if hasattr(count_res, "count") and count_res.count is not None else len(count_res.data)
         
         if current_count + len(insert_payload) > tenant.installation_limit:
@@ -2047,7 +2026,7 @@ def dashboard(request: Request, tenant: AuthTenant):
     # Service role needed to read company_parameters as it has no RLS (engine/admin use)
     # or fallback to 65
     try:
-        param_res = admin_client.table("company_parameters").select("active_threshold").eq("company_id", tenant.company_id).execute()
+        param_res = db.table("company_parameters").select("active_threshold").eq("company_id", tenant.company_id).execute()
         active_threshold = param_res.data[0].get("active_threshold") if param_res.data else 65
     except Exception:
         active_threshold = 65
@@ -2098,7 +2077,7 @@ def dashboard(request: Request, tenant: AuthTenant):
     # Using Supabase joined query (installations is a FK in opportunity_scores)
     top_res = (
         db.table("opportunity_scores")
-        .select("total_score, primary_reason, recommended_action, installations(client_name)")
+        .select("installation_id, total_score, primary_reason, recommended_action")
         .eq("company_id", tenant.company_id)
         .eq("calculated_month", current_month)
         .order("total_score", desc=True)
@@ -2108,7 +2087,7 @@ def dashboard(request: Request, tenant: AuthTenant):
     
     formatted_top = []
     for row in top_res.data:
-        client_name = row.get("installations", {}).get("client_name") if row.get("installations") else "Unknown"
+        client_name = f"PV-{str(row.get('installation_id', ''))[:8].upper()}" if row.get("installation_id") else "Cliente"
         formatted_top.append({
             "client_name": client_name,
             "total_score": row["total_score"],
@@ -2141,7 +2120,7 @@ def activation_list(request: Request, tenant: Tenant, limit: int = 20, offset: i
     current_month = date.today().replace(day=1).isoformat()
     res = (
         db.table("opportunity_scores")
-        .select("id, installation_id, total_score, primary_reason, recommended_action, installations(client_name, location_type, installation_year)")
+        .select("id, installation_id, total_score, primary_reason, recommended_action, installations(location_type, installation_year)")
         .eq("company_id", tenant.company_id)
         .eq("calculated_month", current_month)
         .order("total_score", desc=True)
@@ -2168,7 +2147,7 @@ def activation_list(request: Request, tenant: Tenant, limit: int = 20, offset: i
         output.append({
             "score_id": row.get("id"),
             "installation_id": row.get("installation_id"),
-            "client_name": inst.get("client_name", "Unknown"),
+            "client_name": alias or "Cliente",
             "location_type": inst.get("location_type"),
             "installation_year": inst.get("installation_year"),
             "total_score": row.get("total_score"),
@@ -2262,7 +2241,8 @@ def generate_activation_pdf(request: Request, installation_id: str, tenant: Tena
     
     pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(220, 220, 220)
-    pdf.cell(0, 10, f"Cliente: {inst.get('client_name')}", ln=True, align="C")
+    activation_alias = f"PV-{str(installation_id)[:8].upper()}"
+    pdf.cell(0, 10, f"Cliente: {activation_alias}", ln=True, align="C")
     pdf.ln(10)
     
     # Data card
@@ -2298,7 +2278,7 @@ def generate_activation_pdf(request: Request, installation_id: str, tenant: Tena
     pdf.cell(0, 10, f"Documento generado autom\u00e1ticamente por el motor Solvist. (ID: {installation_id})", align="C")
     
     pdf_bytes = bytes(pdf.output())
-    return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=oportunidad_{inst.get('client_name')}.pdf"})
+    return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=oportunidad_{activation_alias}.pdf"})
 
 
 @app.get("/api/client/{client_id}/proposal-pdf")
@@ -2337,8 +2317,7 @@ def generate_proposal_pdf(request: Request, client_id: str, tenant: Tenant):
     # ─── Client Info ───────────────────────────────────────────────
     pdf.set_font("Helvetica", "", 14)
     pdf.set_text_color(180, 190, 255)
-    client_name_str = f" ({client.get('client_name')})" if client.get('client_name') else ""
-    pdf.cell(0, 10, f"Client: {client.get('client_alias')}{client_name_str}", ln=True, align="C")
+    pdf.cell(0, 10, f"Client: {client.get('client_alias')}", ln=True, align="C")
     pdf.ln(10)
     
     # ─── 1. Opportunity Detected ───────────────────────────────────
@@ -2536,7 +2515,7 @@ def top_priority(request: Request, tenant: Tenant):
     db = scoped_client(tenant.jwt)
     res = (
         db.table("clients")
-        .select("id, client_alias, client_name, opportunity_type, expected_value, close_probability, score, priority_score, status, battery_opportunity_score")
+        .select("id, client_alias, opportunity_type, expected_value, close_probability, score, priority_score, status, battery_opportunity_score")
         .eq("company_id", tenant.company_id)
         .neq("status", "Closed")
         .execute()
@@ -2564,7 +2543,7 @@ def weekly_priority(request: Request, tenant: Tenant, limit: int = 10, min_prior
 
     res = (
         db.table("clients")
-        .select("id, client_alias, client_name, opportunity_type, expected_value, close_probability, priority_score, status")
+        .select("id, client_alias, opportunity_type, expected_value, close_probability, priority_score, status")
         .eq("company_id", tenant.company_id)
         .gte("score", 40)
         .neq("status", "Closed")
@@ -2589,7 +2568,7 @@ def hot_leads(request: Request, tenant: Tenant):
     db = scoped_client(tenant.jwt)
     res = (
         db.table("clients")
-        .select("client_alias, client_name, opportunity_type, expected_value, close_probability, status")
+        .select("client_alias, opportunity_type, expected_value, close_probability, status")
         .eq("company_id", tenant.company_id)
         .gte("close_probability", 0.6)
         .neq("status", "Closed")
@@ -2606,7 +2585,7 @@ def revenue_at_risk(request: Request, tenant: Tenant):
     
     res = (
         db.table("clients")
-        .select("client_alias, client_name, opportunity_type, expected_value, status, last_contact_at")
+        .select("client_alias, opportunity_type, expected_value, status, last_contact_at")
         .eq("company_id", tenant.company_id)
         .neq("status", "Closed")
         .or_(f"last_contact_at.is.null,last_contact_at.lt.{threshold_date}")
@@ -2673,7 +2652,7 @@ def pipeline(request: Request, tenant: AuthTenant):
     db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
     res = (
         db.table("clients")
-        .select("id, client_alias, client_name, opportunity_type, expected_value, close_probability, score, priority_score, status, notes, estimated_annual_export_kwh, estimated_battery_savings, battery_payback_years, battery_opportunity_score, sales_script_long, sales_script_short, opportunity_reason")
+        .select("id, client_alias, opportunity_type, expected_value, close_probability, score, priority_score, status, notes, estimated_annual_export_kwh, estimated_battery_savings, battery_payback_years, battery_opportunity_score, sales_script_long, sales_script_short, opportunity_reason")
         .eq("company_id", tenant.company_id)
         .gte("score", 40)
         .order("priority_score", desc=True)
@@ -3322,6 +3301,9 @@ def system_check(request: Request):
 @app.get("/db-test")
 @limiter.limit("10/minute")
 def db_test(request: Request):
+    if ENVIRONMENT == "production":
+        raise HTTPException(status_code=404, detail="Not Found")
+
     try:
         conn = get_db_connection()
     except Exception:
@@ -3338,11 +3320,19 @@ def db_test(request: Request):
 
                 cur.execute(
                     """
-                    INSERT INTO public.installations (company_id, client_name, installation_year, kwp)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO public.installations (
+                        company_id,
+                        installation_year,
+                        kwp,
+                        inverter_model,
+                        has_battery,
+                        location_type,
+                        country
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id;
                     """,
-                    (company_id, "DB Test Client", 2020, 5.0),
+                    (company_id, 2020, 5.0, "DB Test Inverter", False, "residential", "ES"),
                 )
                 inserted_id = cur.fetchone()[0]
         return {"inserted_id": str(inserted_id)}
