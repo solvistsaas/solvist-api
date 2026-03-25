@@ -160,6 +160,94 @@ class TenantContext(BaseModel):
     class Config:
         frozen = True
 
+
+def _normalize_jwt_sub(jwt_sub: str) -> str:
+    try:
+        return str(uuid.UUID(str(jwt_sub)))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token payload.")
+
+
+def _is_service_role_token(token: str) -> bool:
+    service_key = _normalize_secret(SUPABASE_SERVICE_KEY)
+    return bool(service_key) and secrets.compare_digest(token, service_key)
+
+
+def _get_or_create_public_user(jwt_sub: str, jwt_email: Optional[str]) -> Dict:
+    user_id = _normalize_jwt_sub(jwt_sub)
+    users_table = admin_client.schema("public").table("users")
+
+    print("JWT SUB:", user_id)
+    user: Optional[Dict] = None
+    try:
+        user_res = users_table.select("*").eq("id", user_id).limit(1).execute()
+        user = (user_res.data or [None])[0]
+    except Exception as exc:
+        logger.error("public.users lookup failed for user_id=%s: %s", user_id, str(exc))
+
+    print("USER FOUND:", user)
+    if user:
+        return user
+
+    insert_payload: Dict[str, str] = {"id": user_id}
+    if jwt_email:
+        insert_payload["email"] = jwt_email
+
+    try:
+        created = users_table.insert(insert_payload).execute()
+        user = (created.data or [None])[0]
+    except Exception as create_exc:
+        if "email" in insert_payload:
+            logger.warning("users.email unavailable, retrying user autocreate with id only.")
+            created = users_table.insert({"id": user_id}).execute()
+            user = (created.data or [None])[0]
+        else:
+            logger.error("public.users autocreate failed for user_id=%s: %s", user_id, str(create_exc))
+            raise HTTPException(status_code=500, detail="Failed to provision user.")
+
+    if not user:
+        user_res = users_table.select("*").eq("id", user_id).limit(1).execute()
+        user = (user_res.data or [None])[0]
+
+    print("USER FOUND:", user)
+    if not user:
+        raise HTTPException(status_code=500, detail="Failed to provision user.")
+    return user
+
+
+def _resolve_authenticated_tenant(token: str) -> TenantContext:
+    if _is_service_role_token(token):
+        logger.warning("Authorization token matches service role key. Incoming user JWT may be overwritten upstream.")
+
+    payload = verify_supabase_token(token)
+    jwt_sub = payload["sub"]
+    jwt_email = payload.get("email")
+    user = _get_or_create_public_user(jwt_sub, jwt_email)
+
+    user_id = str(user.get("id") or _normalize_jwt_sub(jwt_sub))
+    company_id = user.get("company_id")
+    if not company_id:
+        raise HTTPException(status_code=403, detail="User has no company.")
+
+    try:
+        res_comp = (
+            admin_client.table("companies")
+            .select("installation_limit")
+            .eq("id", company_id)
+            .single()
+            .execute()
+        )
+        max_inst = res_comp.data.get("installation_limit") or 500
+    except Exception:
+        max_inst = 500
+
+    return TenantContext(
+        user_id=user_id,
+        company_id=company_id,
+        jwt=token,
+        installation_limit=max_inst,
+    )
+
 # ─── Auth Dependency ───────────────────────────────────────────────────────────
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -171,27 +259,7 @@ async def get_tenant(
         raise HTTPException(status_code=401, detail="Missing Authorization header.")
 
     token = credentials.credentials
-    payload = verify_supabase_token(token)
-    user_id = payload["sub"]
-
-    db = scoped_client(token)
-    try:
-        res_user = db.table("users").select("company_id").eq("id", user_id).single().execute()
-        company_id = (res_user.data or {}).get("company_id")
-    except Exception:
-        raise HTTPException(status_code=403, detail="User not registered.")
-
-    if not company_id:
-        raise HTTPException(status_code=403, detail="User has no company.")
-
-    # Fetch installation limit from tenant-scoped context.
-    try:
-        res_comp = db.table("companies").select("installation_limit").eq("id", company_id).single().execute()
-        max_inst = res_comp.data.get("installation_limit") or 500
-    except Exception:
-        max_inst = 500
-
-    tenant = TenantContext(user_id=user_id, company_id=company_id, jwt=token, installation_limit=max_inst)
+    tenant = _resolve_authenticated_tenant(token)
     request.state.tenant = tenant
     return tenant
 
@@ -255,15 +323,18 @@ def _extract_authorization_bearer(
 
     token, scheme, masked_header = parse_bearer_token(auth_header)
     engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
+    service_key = _normalize_secret(SUPABASE_SERVICE_KEY)
     equals_engine = bool(engine_secret) and secrets.compare_digest(token, engine_secret)
+    equals_service = bool(service_key) and secrets.compare_digest(token, service_key)
 
     # Temporary auth diagnostics for production debugging.
-    logger.debug("AUTH HEADER: %s", masked_header)
-    logger.debug("PARSED SCHEME: %s", scheme)
-    logger.debug("TOKEN RECEIVED: %s", _mask_value(token))
-    logger.debug("ENGINE_SECRET LENGTH: %s", len(engine_secret))
-    logger.debug("TOKEN LENGTH: %s", len(token))
-    logger.debug("TOKEN_EQUALS_ENGINE_SECRET: %s", equals_engine)
+    logger.info("AUTH HEADER: %s", masked_header)
+    logger.info("PARSED SCHEME: %s", scheme)
+    logger.info("TOKEN RECEIVED: %s", _mask_value(token))
+    logger.info("ENGINE_SECRET LENGTH: %s", len(engine_secret))
+    logger.info("TOKEN_LENGTH: %s", len(token))
+    logger.info("TOKEN_EQUALS_ENGINE_SECRET: %s", equals_engine)
+    logger.info("TOKEN_EQUALS_SERVICE_ROLE_KEY: %s", equals_service)
     return token
 
 
@@ -303,32 +374,7 @@ async def get_import_tenant(
         request.state.tenant = tenant
         return tenant
 
-    payload = verify_supabase_token(token)
-    user_id = payload["sub"]
-
-    db = scoped_client(token)
-    try:
-        res_user = db.table("users").select("company_id").eq("id", user_id).single().execute()
-        company_id = (res_user.data or {}).get("company_id")
-    except Exception:
-        raise HTTPException(status_code=403, detail="User not registered.")
-
-    if not company_id:
-        raise HTTPException(status_code=403, detail="User has no company.")
-
-    try:
-        res_comp = (
-            db.table("companies")
-            .select("installation_limit")
-            .eq("id", company_id)
-            .single()
-            .execute()
-        )
-        max_inst = res_comp.data.get("installation_limit") or 500
-    except Exception:
-        max_inst = 500
-
-    tenant = TenantContext(user_id=user_id, company_id=company_id, jwt=token, installation_limit=max_inst)
+    tenant = _resolve_authenticated_tenant(token)
     request.state.tenant = tenant
     return tenant
 
@@ -762,6 +808,7 @@ async def lifespan(app: FastAPI):
     global admin_client
     admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     logger.info("Supabase admin client initialized.")
+    print("DEPLOY VERSION: NEW_DEPLOY_ACTIVE")
 
     # FIX #2: Validate ENGINE_SECRET at startup (warn only — don't crash the server)
     if not os.getenv("ENGINE_SECRET"):
@@ -3168,6 +3215,15 @@ def import_status(request: Request, tenant: AuthTenant):
         "last_import_rows": int(LAST_IMPORT_STATUS.get("last_import_rows", 0)),
         "last_import_duration": float(LAST_IMPORT_STATUS.get("last_import_duration", 0.0)),
         "last_import_opportunities": int(LAST_IMPORT_STATUS.get("last_import_opportunities", 0)),
+    }
+
+
+@app.get("/api/auth/status")
+@limiter.limit("30/minute")
+def auth_status(request: Request):
+    return {
+        "status": "ok",
+        "debug": "NEW_DEPLOY_ACTIVE",
     }
 
 
