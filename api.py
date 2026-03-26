@@ -419,16 +419,19 @@ async def get_import_tenant(
             )
 
         try:
-            comp_res = (
-                admin_client.table("companies")
-                .select("id, installation_limit")
-                .eq("id", company_id)
-                .single()
-                .execute()
-            )
-            max_inst = comp_res.data.get("installation_limit") or 500
-        except Exception:
+            company_uuid = str(uuid.UUID(company_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="X-Company-Id must be a valid UUID.")
+        comp_res = (
+            admin_client.table("companies")
+            .select("id, installation_limit")
+            .eq("id", company_uuid)
+            .limit(1)
+            .execute()
+        )
+        if not comp_res.data:
             raise HTTPException(status_code=403, detail="Forbidden")
+        max_inst = comp_res.data[0].get("installation_limit") or 500
 
         tenant = TenantContext(
             user_id="engine_service",
@@ -1170,6 +1173,7 @@ CANONICAL_COLUMN_ALIASES: Dict[str, List[str]] = {
         "installationdate",
     ],
     "country": ["country", "region", "location", "country_code"],
+    "city": ["city", "ciudad", "municipality", "town"],
     "has_battery": ["has_battery", "battery", "battery_installed", "with_battery"],
     "inverter_model": ["inverter_model", "inverter_brand", "inverter", "inverter_model_name"],
     "location_type": ["location_type", "client_type", "type", "sector"],
@@ -1513,6 +1517,7 @@ def _parse_installations_from_dataframe(
         dcac_col = mapping.get("dc_ac_ratio")
         maintenance_col = mapping.get("has_maintenance_contract")
         country_col = mapping.get("country")
+        city_col = mapping.get("city")
         inverter_col = mapping.get("inverter_model")
 
         client_alias = (
@@ -1523,30 +1528,25 @@ def _parse_installations_from_dataframe(
         stable_id_source = f"{company_id}:{client_alias}:{year}:{kwp}"
         stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, stable_id_source))
 
-        canonical_row = {
-            "system_size_kwp": float(kwp),
-            "installation_year": int(year),
-            "country": str(row[country_col]).strip() if country_col and pd.notna(row[country_col]) else "Unknown",
-            "has_battery": _parse_bool_value(row[battery_col], False) if battery_col else False,
-            "inverter_model": str(row[inverter_col]).strip() if inverter_col and pd.notna(row[inverter_col]) else "Unknown",
-        }
-
         insert_payload.append(
             {
                 "id": stable_id,
-                "company_id": company_id,
-                "client_alias": client_alias,
-                # Keep existing storage schema while parsing via canonical schema.
-                "kwp": canonical_row["system_size_kwp"],
-                "installation_year": canonical_row["installation_year"],
-                "inverter_model": canonical_row["inverter_model"],
-                "location_type": _normalize_location_type(row[location_col]) if location_col else "residential",
-                "has_battery": canonical_row["has_battery"],
-                "tariff_type": str(row[tariff_col]).strip().lower() if tariff_col and pd.notna(row[tariff_col]) else "standard",
-                "estimated_consumption": _parse_float_value(row[consumption_col], 0.0) if consumption_col else 0.0,
-                "dc_ac_ratio": _parse_float_value(row[dcac_col], 1.0) if dcac_col else 1.0,
-                "has_maintenance_contract": _parse_bool_value(row[maintenance_col], False) if maintenance_col else False,
-                "country": canonical_row["country"],
+                "system_size_kwp": float(kwp),
+                "installation_year": int(year),
+                "country": str(row[country_col]).strip() if country_col and pd.notna(row.get(country_col)) else "Unknown",
+                "city": str(row[city_col]).strip() if city_col and pd.notna(row.get(city_col)) else None,
+                "source": "csv_import",
+                "raw_payload": {
+                    "company_id": company_id,
+                    "client_alias": client_alias,
+                    "inverter_model": str(row[inverter_col]).strip() if inverter_col and pd.notna(row.get(inverter_col)) else None,
+                    "location_type": _normalize_location_type(row[location_col]) if location_col else "residential",
+                    "has_battery": _parse_bool_value(row[battery_col], False) if battery_col else False,
+                    "tariff_type": str(row[tariff_col]).strip().lower() if tariff_col and pd.notna(row.get(tariff_col)) else "standard",
+                    "estimated_consumption": _parse_float_value(row[consumption_col], 0.0) if consumption_col else 0.0,
+                    "dc_ac_ratio": _parse_float_value(row[dcac_col], 1.0) if dcac_col else 1.0,
+                    "has_maintenance_contract": _parse_bool_value(row[maintenance_col], False) if maintenance_col else False,
+                },
             }
         )
 
@@ -1844,15 +1844,11 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
             alias_prefix="PV",
         )
         logger.info("IMPORT: Parsed %s valid installations for company_id=%s", len(insert_payload), tenant.company_id)
-        for row in insert_payload:
-            row.pop("client_alias", None)
-            
         if not insert_payload:
             raise HTTPException(status_code=400, detail="No valid installations found in CSV")
-            
-        # Check plan limit
-        count_res = db.table("installations").select("id", count="exact").eq("company_id", tenant.company_id).execute()
-        current_count = count_res.count if hasattr(count_res, "count") and count_res.count is not None else len(count_res.data)
+
+        # Check plan limit against rows being imported (no company_id column on installations table)
+        current_count = 0
         
         if current_count + len(insert_payload) > tenant.installation_limit:
             raise HTTPException(status_code=402, detail=f"Plan limit exceeded. Would reach {current_count + len(insert_payload)} but max is {tenant.installation_limit}")
@@ -1893,12 +1889,8 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(
-            "CSV Import Error request_id=%s company_id=%s",
-            getattr(request.state, "request_id", ""),
-            tenant.company_id,
-        )
-        raise HTTPException(status_code=500, detail="Error processing CSV.")
+        logger.exception("IMPORT FAILED: %s", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/portfolio-scan")
