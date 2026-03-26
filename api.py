@@ -62,11 +62,11 @@ from scoring.engine import (
     OPP_INDUSTRIAL_BATTERY
 )
 from config import (
-    SUPABASE_URL, 
-    SUPABASE_SERVICE_KEY,
-    STRIPE_SECRET_KEY, 
-    RESEND_API_KEY, 
-    ENVIRONMENT, 
+    SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY,
+    STRIPE_SECRET_KEY,
+    RESEND_API_KEY,
+    ENVIRONMENT,
     ALLOWED_ORIGINS,
 )
 import resend
@@ -197,7 +197,7 @@ def _normalize_jwt_sub(jwt_sub: str) -> str:
 
 
 def _is_service_role_token(token: str) -> bool:
-    service_key = _normalize_secret(SUPABASE_SERVICE_KEY)
+    service_key = _normalize_secret(SUPABASE_SERVICE_ROLE_KEY)
     return bool(service_key) and secrets.compare_digest(token, service_key)
 
 
@@ -391,7 +391,7 @@ def _extract_authorization_bearer(
 
     token = parse_bearer_token(auth_header)
     engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
-    service_key = _normalize_secret(SUPABASE_SERVICE_KEY)
+    service_key = _normalize_secret(SUPABASE_SERVICE_ROLE_KEY)
     equals_engine = bool(engine_secret) and secrets.compare_digest(token, engine_secret)
     equals_service = bool(service_key) and secrets.compare_digest(token, service_key)
 
@@ -614,7 +614,7 @@ def build_sales_email_draft(client: Dict) -> Dict[str, str]:
 
 def scoped_client(jwt: str) -> Client:
     """Creates a per-request client with the user's JWT (activates RLS auth.uid())."""
-    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     client.postgrest.auth(jwt)
     return client
 
@@ -643,7 +643,7 @@ def core_score_all_installations():
 
     try:
         # Fresh admin client to avoid stale schema cache
-        fresh_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        fresh_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
         # PREP FOR BLOCK 1: Set calculated_month to first day of current month
         calculated_month = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -878,7 +878,7 @@ scheduler = BackgroundScheduler()
 async def lifespan(app: FastAPI):
     # FIX #3: Initialize Supabase admin client at startup, not at module import time
     global admin_client
-    admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     logger.info("Supabase admin client initialized.")
 
     # FIX #2: Validate ENGINE_SECRET at startup (warn only — don't crash the server)
@@ -3270,21 +3270,7 @@ def request_portal_proposal(request: Request, token: str):
 # ─── Endpoints: System Diagnostics & Health (BLOCK R5) ────────────────────────
 
 @app.get("/health")
-@limiter.limit("60/minute")
-def health_check(request: Request):
-    request_id = _request_id_for(request)
-    try:
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1;")
-                cur.fetchone()
-        finally:
-            conn.close()
-        admin_client.table("companies").select("id").limit(1).execute()
-    except Exception:
-        logger.exception("Health check failed request_id=%s endpoint=/health", request_id)
-        raise HTTPException(status_code=500, detail="Internal server error")
+def health_check():
     return {"status": "ok"}
 
 
