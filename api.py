@@ -77,17 +77,17 @@ from db import get_db_connection
 def verify_supabase_token(token: str) -> dict:
     """Validate Supabase JWT against Supabase Auth API using service key."""
     if not admin_client:
-        raise HTTPException(status_code=500, detail="Server authentication not configured.")
+        raise HTTPException(status_code=500, detail="Internal server error")
     try:
         user_res = admin_client.auth.get_user(token)
         user = getattr(user_res, "user", None)
         if not user or not getattr(user, "id", None):
-            raise HTTPException(status_code=401, detail="Invalid token.")
+            raise HTTPException(status_code=401, detail="Unauthorized")
         return {"sub": str(user.id), "email": getattr(user, "email", None)}
     except HTTPException:
         raise
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 if STRIPE_SECRET_KEY:
@@ -143,6 +143,7 @@ COUNTRY_TO_CURRENCY_FALLBACK: Dict[str, str] = {
 IMPORT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 SCORING_BATCH_SIZE = 500
 REQUEST_ID_HEADER = "X-Request-Id"
+DEPLOY_VERSION = "v1.0.0"
 LAST_IMPORT_STATUS: Dict[str, float] = {
     "last_import_rows": 0,
     "last_import_duration": 0.0,
@@ -151,6 +152,15 @@ LAST_IMPORT_STATUS: Dict[str, float] = {
 
 
 # ─── Models & Enums ───────────────────────────────────────────────────────────
+class CurrentUserContext(BaseModel):
+    id: str
+    email: Optional[str] = None
+    company_id: Optional[str] = None
+
+    class Config:
+        frozen = True
+
+
 class TenantContext(BaseModel):
     user_id: str
     company_id: str
@@ -161,11 +171,29 @@ class TenantContext(BaseModel):
         frozen = True
 
 
+def _auth_log(
+    level: int,
+    event: str,
+    request: Optional[Request] = None,
+    user_id: Optional[str] = None,
+) -> None:
+    request_id = getattr(getattr(request, "state", None), "request_id", "")
+    endpoint = str(request.url.path) if request else ""
+    logger.log(
+        level,
+        "AUTH event=%s request_id=%s user_id=%s endpoint=%s",
+        event,
+        request_id,
+        user_id or "",
+        endpoint,
+    )
+
+
 def _normalize_jwt_sub(jwt_sub: str) -> str:
     try:
         return str(uuid.UUID(str(jwt_sub)))
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token payload.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def _is_service_role_token(token: str) -> bool:
@@ -173,67 +201,100 @@ def _is_service_role_token(token: str) -> bool:
     return bool(service_key) and secrets.compare_digest(token, service_key)
 
 
-def _get_or_create_public_user(jwt_sub: str, jwt_email: Optional[str]) -> Dict:
+def _get_or_create_public_user(
+    jwt_sub: str,
+    jwt_email: Optional[str],
+    request: Optional[Request] = None,
+) -> Dict:
     user_id = _normalize_jwt_sub(jwt_sub)
     users_table = admin_client.schema("public").table("users")
 
-    print("JWT SUB:", user_id)
     user: Optional[Dict] = None
     try:
         user_res = users_table.select("*").eq("id", user_id).limit(1).execute()
         user = (user_res.data or [None])[0]
-    except Exception as exc:
-        logger.error("public.users lookup failed for user_id=%s: %s", user_id, str(exc))
-
-    print("USER FOUND:", user)
-    if user:
-        return user
+    except Exception:
+        _auth_log(logging.ERROR, "public_user_lookup_failed", request=request, user_id=user_id)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     insert_payload: Dict[str, str] = {"id": user_id}
     if jwt_email:
         insert_payload["email"] = jwt_email
 
-    try:
-        created = users_table.insert(insert_payload).execute()
-        user = (created.data or [None])[0]
-    except Exception as create_exc:
-        if "email" in insert_payload:
-            logger.warning("users.email unavailable, retrying user autocreate with id only.")
-            created = users_table.insert({"id": user_id}).execute()
+    if not user:
+        try:
+            created = users_table.insert(insert_payload).execute()
             user = (created.data or [None])[0]
-        else:
-            logger.error("public.users autocreate failed for user_id=%s: %s", user_id, str(create_exc))
-            raise HTTPException(status_code=500, detail="Failed to provision user.")
+            _auth_log(logging.INFO, "public_user_autocreated", request=request, user_id=user_id)
+        except Exception:
+            if "email" in insert_payload:
+                _auth_log(
+                    logging.WARNING,
+                    "public_user_autocreate_retry_without_email",
+                    request=request,
+                    user_id=user_id,
+                )
+                try:
+                    created = users_table.insert({"id": user_id}).execute()
+                    user = (created.data or [None])[0]
+                    _auth_log(logging.INFO, "public_user_autocreated", request=request, user_id=user_id)
+                except Exception:
+                    _auth_log(logging.ERROR, "public_user_autocreate_failed", request=request, user_id=user_id)
+                    raise HTTPException(status_code=500, detail="Internal server error")
+            else:
+                _auth_log(logging.ERROR, "public_user_autocreate_failed", request=request, user_id=user_id)
+                raise HTTPException(status_code=500, detail="Internal server error")
 
     if not user:
-        user_res = users_table.select("*").eq("id", user_id).limit(1).execute()
-        user = (user_res.data or [None])[0]
+        try:
+            user_res = users_table.select("*").eq("id", user_id).limit(1).execute()
+            user = (user_res.data or [None])[0]
+        except Exception:
+            _auth_log(logging.ERROR, "public_user_lookup_failed", request=request, user_id=user_id)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
-    print("USER FOUND:", user)
     if not user:
-        raise HTTPException(status_code=500, detail="Failed to provision user.")
+        _auth_log(logging.ERROR, "public_user_resolution_failed", request=request, user_id=user_id)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
     return user
 
 
-def _resolve_authenticated_tenant(token: str) -> TenantContext:
+def _resolve_current_user(token: str, request: Request) -> CurrentUserContext:
     if _is_service_role_token(token):
-        logger.warning("Authorization token matches service role key. Incoming user JWT may be overwritten upstream.")
+        _auth_log(logging.WARNING, "service_role_token_rejected", request=request)
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     payload = verify_supabase_token(token)
-    jwt_sub = payload["sub"]
+    jwt_sub = payload.get("sub")
+    if not jwt_sub:
+        _auth_log(logging.WARNING, "jwt_missing_sub", request=request)
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     jwt_email = payload.get("email")
-    user = _get_or_create_public_user(jwt_sub, jwt_email)
+    user = _get_or_create_public_user(jwt_sub, jwt_email, request=request)
 
     user_id = str(user.get("id") or _normalize_jwt_sub(jwt_sub))
+    email = user.get("email") or jwt_email
     company_id = user.get("company_id")
-    if not company_id:
-        raise HTTPException(status_code=403, detail="User has no company.")
+    current_user = CurrentUserContext(
+        id=user_id,
+        email=str(email) if email else None,
+        company_id=str(company_id) if company_id else None,
+    )
+    _auth_log(logging.INFO, "authenticated_user", request=request, user_id=current_user.id)
+    return current_user
+
+
+def _build_tenant_context(current_user: CurrentUserContext, token: str) -> TenantContext:
+    if not current_user.company_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     try:
         res_comp = (
             admin_client.table("companies")
             .select("installation_limit")
-            .eq("id", company_id)
+            .eq("id", current_user.company_id)
             .single()
             .execute()
         )
@@ -242,26 +303,42 @@ def _resolve_authenticated_tenant(token: str) -> TenantContext:
         max_inst = 500
 
     return TenantContext(
-        user_id=user_id,
-        company_id=company_id,
+        user_id=current_user.id,
+        company_id=current_user.company_id,
         jwt=token,
         installation_limit=max_inst,
     )
 
+
 # ─── Auth Dependency ───────────────────────────────────────────────────────────
 bearer_scheme = HTTPBearer(auto_error=False)
 
-async def get_tenant(
+async def get_current_user(
     request: Request,
     credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
-) -> TenantContext:
-    if not credentials:
-        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+) -> CurrentUserContext:
+    token = _extract_authorization_bearer(request, credentials)
+    current_user = _resolve_current_user(token, request)
+    request.state.current_user = current_user
+    request.state.user_jwt = token
+    return current_user
 
-    token = credentials.credentials
-    tenant = _resolve_authenticated_tenant(token)
+
+CurrentUser = Annotated[CurrentUserContext, Depends(get_current_user)]
+
+
+async def get_tenant(
+    request: Request,
+    current_user: CurrentUser,
+) -> TenantContext:
+    token = getattr(request.state, "user_jwt", "")
+    if not token:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    tenant = _build_tenant_context(current_user, token)
     request.state.tenant = tenant
     return tenant
+
 
 Tenant = Annotated[TenantContext, Depends(get_tenant)]
 
@@ -270,18 +347,10 @@ def _normalize_secret(value: Optional[str]) -> str:
     return (value or "").strip().strip('"').strip("'").strip()
 
 
-def _mask_value(value: str, head: int = 6, tail: int = 4) -> str:
-    if not value:
-        return ""
-    if len(value) <= head + tail:
-        return "*" * len(value)
-    return f"{value[:head]}...{value[-tail:]}"
-
-
-def parse_bearer_token(auth_header: Optional[str]) -> tuple[str, str, str]:
+def parse_bearer_token(auth_header: Optional[str]) -> str:
     auth = (auth_header or "").strip()
     if not auth:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     normalized = auth
     lower = normalized.lower()
@@ -295,22 +364,21 @@ def parse_bearer_token(auth_header: Optional[str]) -> tuple[str, str, str]:
 
     parts = normalized.split(None, 1)
     if len(parts) < 2:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     scheme = parts[0].rstrip(":")
     token = parts[1].strip()
     if scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     while token.lower().startswith("bearer "):
         token = token[7:].strip()
 
     token = token.strip().strip('"').strip("'").strip()
     if not token:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-    masked_header = normalized.replace(parts[1], _mask_value(token), 1)
-    return token, scheme, masked_header
+    return token
 
 
 def _extract_authorization_bearer(
@@ -321,20 +389,17 @@ def _extract_authorization_bearer(
     if not auth_header and credentials and credentials.scheme and credentials.credentials:
         auth_header = f"{credentials.scheme} {credentials.credentials}"
 
-    token, scheme, masked_header = parse_bearer_token(auth_header)
+    token = parse_bearer_token(auth_header)
     engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
     service_key = _normalize_secret(SUPABASE_SERVICE_KEY)
     equals_engine = bool(engine_secret) and secrets.compare_digest(token, engine_secret)
     equals_service = bool(service_key) and secrets.compare_digest(token, service_key)
 
-    # Temporary auth diagnostics for production debugging.
-    logger.info("AUTH HEADER: %s", masked_header)
-    logger.info("PARSED SCHEME: %s", scheme)
-    logger.info("TOKEN RECEIVED: %s", _mask_value(token))
-    logger.info("ENGINE_SECRET LENGTH: %s", len(engine_secret))
-    logger.info("TOKEN_LENGTH: %s", len(token))
-    logger.info("TOKEN_EQUALS_ENGINE_SECRET: %s", equals_engine)
-    logger.info("TOKEN_EQUALS_SERVICE_ROLE_KEY: %s", equals_service)
+    if equals_service:
+        _auth_log(logging.WARNING, "service_role_token_received", request=request)
+    elif equals_engine:
+        _auth_log(logging.INFO, "engine_secret_token_received", request=request)
+
     return token
 
 
@@ -363,7 +428,7 @@ async def get_import_tenant(
             )
             max_inst = comp_res.data.get("installation_limit") or 500
         except Exception:
-            raise HTTPException(status_code=403, detail="Invalid company for engine authentication.")
+            raise HTTPException(status_code=403, detail="Forbidden")
 
         tenant = TenantContext(
             user_id="engine_service",
@@ -374,7 +439,10 @@ async def get_import_tenant(
         request.state.tenant = tenant
         return tenant
 
-    tenant = _resolve_authenticated_tenant(token)
+    current_user = _resolve_current_user(token, request)
+    request.state.current_user = current_user
+    request.state.user_jwt = token
+    tenant = _build_tenant_context(current_user, token)
     request.state.tenant = tenant
     return tenant
 
@@ -409,8 +477,12 @@ async def get_internal_metrics_auth(
         request.state.tenant = tenant
         return tenant
 
-    jwt_credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-    return await get_tenant(request, jwt_credentials)
+    current_user = _resolve_current_user(token, request)
+    request.state.current_user = current_user
+    request.state.user_jwt = token
+    tenant = _build_tenant_context(current_user, token)
+    request.state.tenant = tenant
+    return tenant
 
 
 InternalMetricsTenant = Annotated[TenantContext, Depends(get_internal_metrics_auth)]
@@ -808,7 +880,6 @@ async def lifespan(app: FastAPI):
     global admin_client
     admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     logger.info("Supabase admin client initialized.")
-    print("DEPLOY VERSION: NEW_DEPLOY_ACTIVE")
 
     # FIX #2: Validate ENGINE_SECRET at startup (warn only — don't crash the server)
     if not os.getenv("ENGINE_SECRET"):
@@ -962,7 +1033,7 @@ async def audit_middleware(request: Request, call_next):
 
     if request.url.path in {"/api/public/portfolio-scan", "/portfolio-scan"} or request.method == "OPTIONS":
         logger.info(
-            "CORS_DEBUG inbound request_id=%s method=%s path=%s origin=%s",
+            "CORS inbound request_id=%s method=%s path=%s origin=%s",
             request_id,
             request.method,
             request.url.path,
@@ -998,7 +1069,7 @@ async def audit_middleware(request: Request, call_next):
 
     if request.url.path in {"/api/public/portfolio-scan", "/portfolio-scan"} or request.method == "OPTIONS":
         logger.info(
-            "CORS_DEBUG outbound request_id=%s status=%s allow_origin=%s",
+            "CORS outbound request_id=%s status=%s allow_origin=%s",
             request_id,
             response.status_code,
             response.headers.get("access-control-allow-origin", ""),
@@ -3088,7 +3159,7 @@ def get_public_portal(request: Request, token: str):
             "event_metadata": {"ip": request.client.host if request.client else "unknown"}
         }).execute()
     except Exception as e:
-        print(f"Failed to log portal_opened event: {e}")
+        logger.warning("Failed to log portal_opened event: %s", str(e))
         
     return res.data
 
@@ -3122,7 +3193,7 @@ def request_portal_proposal(request: Request, token: str):
     )
     
     if existing_lead.data:
-        print("Duplicate portal lead prevented")
+        logger.info("Duplicate portal lead prevented")
         return {"success": True}
         
     res_lead = (
@@ -3144,7 +3215,7 @@ def request_portal_proposal(request: Request, token: str):
             "event_type": "consultation_requested"
         }).execute()
     except Exception as e:
-        print(f"Failed to log consultation_requested event: {e}")
+        logger.warning("Failed to log consultation_requested event: %s", str(e))
 
     # Feedback loop visible in installer timeline/dashboard
     try:
@@ -3201,11 +3272,20 @@ def request_portal_proposal(request: Request, token: str):
 @app.get("/health")
 @limiter.limit("60/minute")
 def health_check(request: Request):
-    return {
-        "status": "ok",
-        "service": "solvist-api",
-        "environment": ENVIRONMENT
-    }
+    request_id = _request_id_for(request)
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+                cur.fetchone()
+        finally:
+            conn.close()
+        admin_client.table("companies").select("id").limit(1).execute()
+    except Exception:
+        logger.exception("Health check failed request_id=%s endpoint=/health", request_id)
+        raise HTTPException(status_code=500, detail="Internal server error")
+    return {"status": "ok"}
 
 
 @app.get("/api/import/status")
@@ -3220,10 +3300,10 @@ def import_status(request: Request, tenant: AuthTenant):
 
 @app.get("/api/auth/status")
 @limiter.limit("30/minute")
-def auth_status(request: Request):
+def auth_status(request: Request, current_user: CurrentUser):
     return {
-        "status": "ok",
-        "debug": "NEW_DEPLOY_ACTIVE",
+        "user_id": current_user.id,
+        "status": "authenticated",
     }
 
 
@@ -3256,47 +3336,16 @@ def health_pipeline(request: Request, tenant: AuthTenant):
     }
 
 
-@app.get("/debug/auth")
-@limiter.limit("30/minute")
-def debug_auth(request: Request):
-    if ENVIRONMENT == "production":
-        raise HTTPException(status_code=404, detail="Not Found")
-
-    header_raw = (request.headers.get("Authorization") or "").strip()
-    engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
-
-    try:
-        token, scheme, masked_header = parse_bearer_token(header_raw)
-        token_masked = _mask_value(token)
-        token_length = len(token)
-        token_equal_engine_secret = bool(engine_secret) and secrets.compare_digest(token, engine_secret)
-        parse_error = None
-    except HTTPException as exc:
-        scheme = None
-        masked_header = header_raw[:24] + ("..." if len(header_raw) > 24 else "")
-        token_masked = None
-        token_length = 0
-        token_equal_engine_secret = False
-        parse_error = exc.detail
-
-    return {
-        "header_received": masked_header,
-        "token_parsed": token_masked,
-        "engine_secret_length": len(engine_secret),
-        "parsed_scheme": scheme,
-        "token_length": token_length,
-        "token_equal_engine_secret": token_equal_engine_secret,
-        "parse_error": parse_error,
-    }
+@app.get("/version")
+@limiter.limit("60/minute")
+def version(request: Request):
+    return {"version": DEPLOY_VERSION}
 
 
 @app.get("/api/version")
 @limiter.limit("60/minute")
 def api_version(request: Request):
-    return {
-        "service": "solvist-api",
-        "version": "v1"
-    }
+    return {"version": DEPLOY_VERSION}
 
 
 @app.get("/api/system-check")
