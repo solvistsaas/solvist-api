@@ -125,12 +125,6 @@ SALES_ACTION_DISPLAY_ES: Dict[str, str] = {
     "proposal_sent": "Propuesta enviada",
 }
 
-OPPORTUNITY_VALUES: Dict[str, float] = {
-    OPP_BATTERY_UPGRADE: 4500.0,
-    OPP_INVERTER_REPLACEMENT: 2500.0,
-    OPP_SYSTEM_EXPANSION: 3500.0,
-}
-
 COUNTRY_TO_CURRENCY_FALLBACK: Dict[str, str] = {
     "PR": "USD",
     "US": "USD",
@@ -740,32 +734,24 @@ def core_score_all_installations():
                         score_row.pop("priority_score", None)
                         score_row.pop("recommendation_level", None)
                         score_row.pop("inverter_score", None)
+                        score_row.pop("value_breakdown", None)  # Remove breakdown from score storage
                         upsert_payload.append(score_row)
-                        
-                        # Oportunidad única por instalación y expected_value realista
+
+                        # Use expected_value from scoring engine (dynamic calculation)
                         score = result["total_score"]
                         opp_type = result["primary_reason"]
-                        if opp_type not in [OPP_BATTERY_UPGRADE, OPP_INVERTER_REPLACEMENT, OPP_SYSTEM_EXPANSION]:
-                            opp_type = OPP_BATTERY_UPGRADE
-                        expected_value = OPPORTUNITY_VALUES.get(opp_type, 0.0)
+                        expected_value = result.get("expected_value", 0.0)
 
-                        # Close probability tiering
-                        if score < 40:
-                            close_prob = 0.1
-                        elif score <= 60:
-                            close_prob = 0.25
-                        elif score <= 80:
-                            close_prob = 0.45
-                        else:
-                            close_prob = 0.65
-                        
+                        # Close probability from scoring engine
+                        close_prob = result.get("close_probability", 0.1)
+
                         # Dynamic generation of client_alias using UUID snippet
                         client_alias = f"PV-{str(inst.get('id', '0000'))[:8].upper()}"
-                        
+
                         weighted_expected_revenue = expected_value * close_prob
-                        
-                        # BLOCK F53: Priority Score
-                        priority_score = (score * 0.4) + (batt_score * 0.3) + (close_prob * 100 * 0.3)
+
+                        # Priority Score from scoring engine
+                        priority_score = result.get("priority_score", score)
 
                         clients_payload.append({
                             "company_id": inst["company_id"],
@@ -777,9 +763,9 @@ def core_score_all_installations():
                             "opportunity_type": opp_type,
                             "score": score,
                             "priority_score": round(priority_score, 1),
-                            "expected_value": expected_value,
+                            "expected_value": round(expected_value, 2),
                             "close_probability": close_prob,
-                            "weighted_expected_revenue": weighted_expected_revenue,
+                            "weighted_expected_revenue": round(weighted_expected_revenue, 2),
                             # Battery fields
                             "estimated_annual_export_kwh": annual_export,
                             "estimated_battery_savings": round(float(battery_savings or 0)),
@@ -1151,7 +1137,8 @@ PORTFOLIO_SCAN_REQUIRED_COLUMNS_MESSAGE = (
 )
 
 
-REQUIRED_CANONICAL_FIELDS = ("system_size_kwp", "installation_year")
+REQUIRED_CANONICAL_FIELDS = ("system_size_kwp",)  # Only kwp is strictly required
+DEFAULT_INSTALLATION_YEAR = None  # Will use current year - 5 if missing
 
 # Canonical CSV schema aliases. First matching column is selected.
 CANONICAL_COLUMN_ALIASES: Dict[str, List[str]] = {
@@ -1465,26 +1452,25 @@ def _parse_installations_from_dataframe(
     df = _normalize_dataframe_columns(df)
     mapping = _resolve_column_mapping(df)
 
-    missing_required = {
-        "system_size_kwp": "system_size_kwp" not in mapping,
-        "installation_year": "installation_year" not in mapping,
-    }
-    if missing_required["system_size_kwp"] or missing_required["installation_year"]:
+    # Debug: log detected columns
+    logger.info(f"CSV detected columns: {list(df.columns)}")
+    logger.info(f"Column mapping: {mapping}")
+
+    # Only system_size_kwp is strictly required
+    if "system_size_kwp" not in mapping:
         if required_columns_error_message:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "Missing required columns",
+                    "error": "Missing required column: kwp (system_size_kwp)",
                     "message": required_columns_error_message,
-                    "details": missing_required,
                     "columns_detected": list(df.columns),
                 },
             )
         raise HTTPException(
             status_code=400,
             detail={
-                "error": "Missing required columns",
-                "details": missing_required,
+                "error": "Missing required column: kwp (system_size_kwp)",
                 "columns_detected": list(df.columns),
             },
         )
@@ -1507,7 +1493,17 @@ def _parse_installations_from_dataframe(
                 detail={"error": "Invalid required field value", "field": "system_size_kwp", "row": row_number, "value": str(row[mapping["system_size_kwp"]])},
             )
 
-        year = _coerce_required_year(row[mapping["installation_year"]], row_number=row_number)
+        # installation_year is optional - default to None (will use current year - 5 in scoring)
+        year_col = mapping.get("installation_year")
+        if year_col and pd.notna(row.get(year_col)):
+            try:
+                year = int(str(row[year_col]).strip())
+                if year < 1990 or year > 2100:
+                    year = None
+            except (ValueError, TypeError):
+                year = None
+        else:
+            year = None
 
         alias_col = mapping.get("client_alias")
         location_col = mapping.get("location_type")
@@ -1525,15 +1521,23 @@ def _parse_installations_from_dataframe(
             if alias_col and pd.notna(row.get(alias_col)) and str(row[alias_col]).strip()
             else f"{alias_prefix}-{row_pos + 1:04d}"
         )
-        stable_id_source = f"{company_id}:{client_alias}:{year}:{kwp}"
+        stable_id_source = f"{company_id}:{client_alias}:{year or 'unknown'}:{kwp}"
         stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, stable_id_source))
+
+        # Debug log for row data
+        logger.debug(f"CSV row {row_number}: kwp={kwp}, year={year}, alias={client_alias}")
+
+        # Get country with default
+        country_value = "ES"  # Default to Spain
+        if country_col and pd.notna(row.get(country_col)):
+            country_value = str(row[country_col]).strip()
 
         insert_payload.append(
             {
                 "id": stable_id,
                 "system_size_kwp": float(kwp),
-                "installation_year": int(year),
-                "country": str(row[country_col]).strip() if country_col and pd.notna(row.get(country_col)) else "Unknown",
+                "installation_year": int(year) if year else None,  # Will use default in scoring engine
+                "country": country_value,
                 "city": str(row[city_col]).strip() if city_col and pd.notna(row.get(city_col)) else None,
                 "source": "csv_import",
                 "raw_payload": {
@@ -2016,9 +2020,8 @@ async def public_portfolio_scan(
                 continue
 
             opp_type = result.get("primary_reason")
-            expected_value = OPPORTUNITY_VALUES.get(opp_type, 0.0)
-            if expected_value <= 0:
-                continue
+            # Use dynamic expected_value from scoring engine
+            expected_value = float(result.get("expected_value") or 0)
 
             scored_clients.append(
                 {
@@ -2028,7 +2031,7 @@ async def public_portfolio_scan(
                     "score": float(result.get("total_score") or 0),
                     "priority_score": float(result.get("priority_score") or 0),
                     "close_probability": float(result.get("close_probability") or 0),
-                    "expected_value": float(expected_value),
+                    "expected_value": expected_value,
                 }
             )
 
