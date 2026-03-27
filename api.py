@@ -869,21 +869,41 @@ scheduler = BackgroundScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("Startup begin")
     # FIX #3: Initialize Supabase admin client at startup, not at module import time
     global admin_client
-    admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    logger.info("Supabase admin client initialized.")
+    try:
+        admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        logger.info("Supabase admin client initialized.")
+    except Exception:
+        logger.exception("Startup failed: Supabase client init error")
+        raise
 
     # FIX #2: Validate ENGINE_SECRET at startup (warn only — don't crash the server)
     if not os.getenv("ENGINE_SECRET"):
         logger.warning("ENGINE_SECRET not configured — /api/engine/score-all will return 403.")
 
-    scheduler.add_job(core_score_all_installations, 'interval', hours=24)
-    scheduler.start()
-    logger.info("APScheduler initialized for daily scoring.")
+    try:
+        scheduler.add_job(core_score_all_installations, 'interval', hours=24)
+        scheduler.start()
+        logger.info("APScheduler initialized for daily scoring.")
+    except Exception:
+        logger.exception("Startup warning: APScheduler failed to start (continuing without scheduler)")
 
-    yield
-    scheduler.shutdown()
+    logger.info("Startup complete")
+    try:
+        yield
+    except Exception:
+        logger.exception("Unhandled error in lifespan")
+        raise
+    finally:
+        logger.info("Shutdown begin")
+        try:
+            if scheduler.running:
+                scheduler.shutdown()
+        except Exception:
+            logger.exception("Shutdown warning: APScheduler shutdown failed")
+        logger.info("Shutdown complete")
 
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
 
