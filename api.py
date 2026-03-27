@@ -380,6 +380,10 @@ def _extract_authorization_bearer(
     credentials: Optional[HTTPAuthorizationCredentials] = None,
 ) -> str:
     auth_header = request.headers.get("Authorization")
+    if auth_header:
+        _auth_log(logging.INFO, "auth_header_present", request=request)
+    else:
+        _auth_log(logging.WARNING, "auth_header_missing", request=request)
     if not auth_header and credentials and credentials.scheme and credentials.credentials:
         auth_header = f"{credentials.scheme} {credentials.credentials}"
 
