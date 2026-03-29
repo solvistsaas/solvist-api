@@ -493,11 +493,10 @@ async def get_import_tenant(
             .execute()
         )
         if not comp_res.data:
-            print("AUTH DEBUG:", {
+            print("AUTH FAILURE", {
                 "user_id": "engine_service",
-                "email": None,
-                "user_found": False,
                 "tenant_id": company_id,
+                "reason": "tenant missing or invalid",
             })
             raise HTTPException(status_code=403, detail="Forbidden")
         max_inst = comp_res.data[0].get("installation_limit") or 500
@@ -522,11 +521,10 @@ async def get_import_tenant(
     request.state.user_jwt = token
     tenant = _build_tenant_context(current_user, token)
     if not tenant.company_id:
-        print("AUTH DEBUG:", {
+        print("AUTH FAILURE", {
             "user_id": current_user.id,
-            "email": current_user.email,
-            "user_found": True,
-            "tenant_id": None,
+            "tenant_id": current_user.company_id,
+            "reason": "tenant missing or invalid",
         })
         raise HTTPException(
             status_code=403,
@@ -575,6 +573,7 @@ async def get_internal_metrics_auth(
 
 
 InternalMetricsTenant = Annotated[TenantContext, Depends(get_internal_metrics_auth)]
+
 
 class LocationTypeEnum(str, Enum):
     residential = "residential"
@@ -1020,6 +1019,41 @@ app.add_middleware(
 )
 
 app.state.limiter = limiter
+
+
+@app.get("/api/debug/routes")
+def debug_routes():
+    return [route.path for route in app.routes]
+
+
+@app.get("/api/debug/auth-check")
+def debug_auth(current_user: CurrentUser):
+    return {
+        "user_id": current_user.id,
+        "tenant_id": current_user.company_id,
+        "email": current_user.email,
+    }
+
+
+@app.get("/api/debug/installations-count")
+def debug_installations_count(request: Request, current_user: CurrentUser):
+    tenant_id = current_user.company_id or "default"
+    user_jwt = getattr(request.state, "user_jwt", "")
+    if not user_jwt:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    db = scoped_client(user_jwt)
+    res = (
+        db.table("installations")
+        .select("id", count="exact")
+        .eq("company_id", tenant_id)
+        .execute()
+    )
+    count = res.count if hasattr(res, "count") and res.count is not None else len(res.data or [])
+    return {
+        "count": count,
+        "tenant_id": tenant_id,
+    }
 
 
 def _request_id_for(request: Request) -> str:
@@ -1954,17 +1988,46 @@ def create_installation(
 
 
 # ─── Endpoints: Import Installations V1 ──────────────────────────────────────────
+# TEST AUTH
+# curl -H "Authorization: Bearer <TOKEN>" \
+# https://solvist-api-wbz1.onrender.com/api/debug/auth-check
+#
+# TEST IMPORT
+# curl -X POST https://solvist-api-wbz1.onrender.com/api/import/installations \
+#   -H "Authorization: Bearer <TOKEN>" \
+#   -F "file=@test.csv"
 @app.post("/api/import/installations")
 @limiter.limit("5/minute")
 async def import_installations(request: Request, tenant: ImportTenant, file: UploadFile = File(...)):
-    if not file.filename or not file.filename.lower().endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
-        
+    print("IMPORT START", {
+        "filename": file.filename if file else None,
+        "content_type": file.content_type if file else None,
+    })
+    print("IMPORT USER CONTEXT", {
+        "user_id": tenant.user_id,
+        "tenant_id": tenant.company_id,
+    })
+
+    if not file:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Invalid file type, must be CSV")
+
+    row_count = 0
     db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
     logger.info("IMPORT: Received CSV upload filename=%s company_id=%s", file.filename, tenant.company_id)
     import_started_at = datetime.now(timezone.utc)
-    
+
     try:
+        preview_contents = await file.read()
+        print("CSV SIZE:", len(preview_contents))
+        preview = preview_contents[:200].decode("utf-8", errors="ignore")
+        print("CSV PREVIEW:", preview)
+        try:
+            file.file.seek(0)
+        except Exception:
+            pass
+
         content = await file.read()
         file_size = len(content)
         logger.info("IMPORT: CSV file size=%s bytes filename=%s company_id=%s", file_size, file.filename, tenant.company_id)
@@ -1980,6 +2043,11 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
             logger.info("IMPORT: CSV preview rows=%s filename=%s company_id=%s", preview_rows, file.filename, tenant.company_id)
         except Exception as preview_error:
             logger.warning("IMPORT: CSV preview failed filename=%s company_id=%s error=%s", file.filename, tenant.company_id, preview_error)
+
+        try:
+            row_count = max(0, len(preview_text.splitlines()) - 1)
+        except Exception:
+            row_count = 0
 
         if len(content) > IMPORT_MAX_FILE_SIZE_BYTES:
             raise HTTPException(status_code=413, detail="File too large. Maximum allowed size is 10MB.")
@@ -2003,6 +2071,10 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
         for chunk in [insert_payload[i:i + 100] for i in range(0, len(insert_payload), 100)]:
             db.table("installations").upsert(chunk, on_conflict="id").execute()
         logger.info("IMPORT: Inserted %s installations for company_id=%s", len(insert_payload), tenant.company_id)
+        print("DB INSERT CHECK", {
+            "rows_inserted": len(insert_payload),
+            "tenant_id": tenant.company_id,
+        })
             
         # Trigger engine job automatically after importing (non-blocking)
         scoring_triggered = False
@@ -2027,19 +2099,28 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
                 "scoring_triggered": scoring_triggered,
             },
         )
-        
+
+        print("IMPORT SUCCESS", {
+            "rows_processed": row_count if row_count else "unknown",
+            "tenant_id": tenant.company_id,
+        })
+
         return {
+            "success": True,
+            "rows_processed": row_count if row_count else len(insert_payload),
+            "tenant_id": tenant.company_id,
             "installations_imported": len(insert_payload),
             "scoring_triggered": scoring_triggered
         }
     except Exception as e:
-        print("CSV ERROR:", str(e))
+        import traceback
+        print("IMPORT ERROR:", str(e))
         traceback.print_exc()
         logger.exception("IMPORT FAILED: %s", str(e))
         return JSONResponse(
-            status_code=400,
+            status_code=500,
             content={
-                "error": "CSV processing failed",
+                "error": "Import failed",
                 "details": str(e)
             }
         )
@@ -2717,7 +2798,9 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
             logger.info("commercial_dashboard: no authenticated user context")
             return empty_dashboard
 
-        if not current_user.company_id:
+        tenant_id = current_user.company_id or "default"
+
+        if not tenant_id:
             logger.info("commercial_dashboard: user without company_id user_id=%s", current_user.id)
             return empty_dashboard
 
@@ -2730,14 +2813,18 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
         if not db:
             raise RuntimeError("Base de datos no inicializada")
 
-        logger.info("commercial_dashboard: fetching dashboard metrics for company_id=%s", current_user.company_id)
-        res = db.rpc("get_commercial_dashboard_metrics", {"p_company_id": current_user.company_id}).execute()
+        logger.info("commercial_dashboard: fetching dashboard metrics for company_id=%s", tenant_id)
+        res = db.rpc("get_commercial_dashboard_metrics", {"p_company_id": tenant_id}).execute()
+        print("DASHBOARD QUERY", {
+            "tenant_id": tenant_id,
+            "systems_found": len(res.data or []),
+        })
 
-        logger.info("commercial_dashboard: fetching opportunity value rows for company_id=%s", current_user.company_id)
+        logger.info("commercial_dashboard: fetching opportunity value rows for company_id=%s", tenant_id)
         opportunity_value_res = (
             db.table("clients")
             .select("expected_value")
-            .eq("company_id", current_user.company_id)
+            .eq("company_id", tenant_id)
             .gte("score", 40)
             .execute()
         )
