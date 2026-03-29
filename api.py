@@ -25,6 +25,7 @@ import time
 from threading import Lock
 from textwrap import dedent
 from datetime import datetime, timezone, date, timedelta
+from decimal import Decimal
 from typing import Annotated, Dict, List, Literal, Optional
 from enum import Enum
 from urllib.parse import urlparse, parse_qs
@@ -591,6 +592,18 @@ def pipeline_status_display_es(status_value: Optional[str]) -> str:
     if not status_value:
         return "Sin estado"
     return PIPELINE_STATUS_ES.get(status_value, status_value)
+
+
+def _json_safe(value):
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def build_sales_email_draft(client: Dict) -> Dict[str, str]:
@@ -2605,38 +2618,40 @@ def opportunity_insights(request: Request, tenant: Tenant):
 @app.get("/api/commercial-dashboard")
 @limiter.limit("30/minute")
 def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
-    empty_dashboard = {
-        "currency": "EUR",
-        "total_systems": 0,
-        "total_pipeline_value": 0.0,
-        "total_opportunity_value": 0.0,
-        "weighted_forecast": 0.0,
-        "closed_revenue": 0.0,
-        "hot_leads_count": 0,
-        "clients": [],
-        "pipeline": [],
-    }
-
-    if not current_user:
-        logger.info("commercial_dashboard: no authenticated user context")
-        return empty_dashboard
-
-    if not current_user.company_id:
-        logger.info("commercial_dashboard: user without company_id user_id=%s", current_user.id)
-        return empty_dashboard
-
-    user_jwt = getattr(request.state, "user_jwt", "")
-    if not user_jwt:
-        logger.warning("commercial_dashboard: missing user_jwt user_id=%s", current_user.id)
-        return empty_dashboard
-
     try:
+        empty_dashboard = {
+            "currency": "EUR",
+            "total_systems": 0,
+            "total_pipeline_value": 0.0,
+            "total_opportunity_value": 0.0,
+            "weighted_forecast": 0.0,
+            "closed_revenue": 0.0,
+            "hot_leads_count": 0,
+            "clients": [],
+            "pipeline": [],
+        }
+
+        if not current_user:
+            logger.info("commercial_dashboard: no authenticated user context")
+            return empty_dashboard
+
+        if not current_user.company_id:
+            logger.info("commercial_dashboard: user without company_id user_id=%s", current_user.id)
+            return empty_dashboard
+
+        user_jwt = getattr(request.state, "user_jwt", "")
+        if not user_jwt:
+            logger.warning("commercial_dashboard: missing user_jwt user_id=%s", current_user.id)
+            return empty_dashboard
+
         db = scoped_client(user_jwt)
         if not db:
             raise RuntimeError("Base de datos no inicializada")
 
+        logger.info("commercial_dashboard: fetching dashboard metrics for company_id=%s", current_user.company_id)
         res = db.rpc("get_commercial_dashboard_metrics", {"p_company_id": current_user.company_id}).execute()
 
+        logger.info("commercial_dashboard: fetching opportunity value rows for company_id=%s", current_user.company_id)
         opportunity_value_res = (
             db.table("clients")
             .select("expected_value")
@@ -2659,11 +2674,26 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
                 "clients": [],
                 "pipeline": [],
             }
-    except Exception:
-        logger.exception("commercial_dashboard failed user_id=%s company_id=%s", current_user.id, current_user.company_id)
+            return _json_safe(payload)
 
-    # Fallback con ceros para no romper frontend si no hay datos o hay error temporal.
-    return empty_dashboard
+        return empty_dashboard
+    except Exception:
+        logger.exception(
+            "commercial_dashboard failed user_id=%s company_id=%s",
+            getattr(current_user, "id", None),
+            getattr(current_user, "company_id", None),
+        )
+        return {
+            "currency": "EUR",
+            "total_systems": 0,
+            "total_pipeline_value": 0.0,
+            "total_opportunity_value": 0.0,
+            "weighted_forecast": 0.0,
+            "closed_revenue": 0.0,
+            "hot_leads_count": 0,
+            "clients": [],
+            "pipeline": [],
+        }
 
 
 @app.get("/api/top-priority")
@@ -2695,23 +2725,24 @@ def top_priority(request: Request, tenant: Tenant):
 @app.get("/api/weekly-priority")
 @limiter.limit("30/minute")
 def weekly_priority(request: Request, current_user: OptionalCurrentUser, limit: int = 10, min_priority: float = 0):
-    if not current_user:
-        logger.info("weekly_priority: no authenticated user context")
-        return []
-
-    if not current_user.company_id:
-        logger.info("weekly_priority: user without company_id user_id=%s", current_user.id)
-        return []
-
-    user_jwt = getattr(request.state, "user_jwt", "")
-    if not user_jwt:
-        logger.warning("weekly_priority: missing user_jwt user_id=%s", current_user.id)
-        return []
-
     try:
+        if not current_user:
+            logger.info("weekly_priority: no authenticated user context")
+            return []
+
+        if not current_user.company_id:
+            logger.info("weekly_priority: user without company_id user_id=%s", current_user.id)
+            return []
+
+        user_jwt = getattr(request.state, "user_jwt", "")
+        if not user_jwt:
+            logger.warning("weekly_priority: missing user_jwt user_id=%s", current_user.id)
+            return []
+
         db = scoped_client(user_jwt)
         safe_limit = max(1, min(limit, 100))
 
+        logger.info("weekly_priority: fetching clients for company_id=%s", current_user.company_id)
         res = (
             db.table("clients")
             .select("id, client_alias, opportunity_type, expected_value, close_probability, priority_score, status")
@@ -2730,9 +2761,13 @@ def weekly_priority(request: Request, current_user: OptionalCurrentUser, limit: 
             row["opportunity_type_display"] = opportunity_display_es(slug)
             row["status_display"] = pipeline_status_display_es(row.get("status"))
 
-        return data
+        return _json_safe(data)
     except Exception:
-        logger.exception("weekly_priority failed user_id=%s company_id=%s", current_user.id, current_user.company_id)
+        logger.exception(
+            "weekly_priority failed user_id=%s company_id=%s",
+            getattr(current_user, "id", None),
+            getattr(current_user, "company_id", None),
+        )
         return []
 
 
@@ -2823,21 +2858,22 @@ def get_client_timeline(request: Request, client_id: str, tenant: Tenant):
 @app.get("/api/pipeline")
 @limiter.limit("30/minute")
 def pipeline(request: Request, current_user: OptionalCurrentUser):
-    if not current_user:
-        logger.info("pipeline: no authenticated user context")
-        return []
-
-    if not current_user.company_id:
-        logger.info("pipeline: user without company_id user_id=%s", current_user.id)
-        return []
-
-    user_jwt = getattr(request.state, "user_jwt", "")
-    if not user_jwt:
-        logger.warning("pipeline: missing user_jwt user_id=%s", current_user.id)
-        return []
-
     try:
+        if not current_user:
+            logger.info("pipeline: no authenticated user context")
+            return []
+
+        if not current_user.company_id:
+            logger.info("pipeline: user without company_id user_id=%s", current_user.id)
+            return []
+
+        user_jwt = getattr(request.state, "user_jwt", "")
+        if not user_jwt:
+            logger.warning("pipeline: missing user_jwt user_id=%s", current_user.id)
+            return []
+
         db = scoped_client(user_jwt)
+        logger.info("pipeline: fetching clients for company_id=%s", current_user.company_id)
         res = (
             db.table("clients")
             .select("id, client_alias, opportunity_type, expected_value, close_probability, score, priority_score, status, notes, estimated_annual_export_kwh, estimated_battery_savings, battery_payback_years, battery_opportunity_score, sales_script_long, sales_script_short, opportunity_reason")
@@ -2853,9 +2889,13 @@ def pipeline(request: Request, current_user: OptionalCurrentUser):
             slug = c.get("opportunity_type")
             c["opportunity_type_display"] = opportunity_display_es(slug)
 
-        return data
+        return _json_safe(data)
     except Exception:
-        logger.exception("pipeline failed user_id=%s company_id=%s", current_user.id, current_user.company_id)
+        logger.exception(
+            "pipeline failed user_id=%s company_id=%s",
+            getattr(current_user, "id", None),
+            getattr(current_user, "company_id", None),
+        )
         return []
 
 
