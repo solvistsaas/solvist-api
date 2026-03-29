@@ -21,6 +21,9 @@ import secrets
 import re
 import json
 import csv
+import io
+import traceback
+import csv
 import time
 from threading import Lock
 from textwrap import dedent
@@ -202,7 +205,7 @@ def _get_or_create_public_user(
     request: Optional[Request] = None,
 ) -> Dict:
     user_id = _normalize_jwt_sub(jwt_sub)
-    users_table = admin_client.schema("public").table("users")
+    users_table = admin_client.table("users")
 
     user: Optional[Dict] = None
     try:
@@ -952,7 +955,10 @@ app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespa
 # CORS must be attached to the production app instance immediately after app init.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://solvist-frontend-2wag.vercel.app",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1905,6 +1911,21 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
     
     try:
         content = await file.read()
+        file_size = len(content)
+        logger.info("IMPORT: CSV file size=%s bytes filename=%s company_id=%s", file_size, file.filename, tenant.company_id)
+        try:
+            preview_text = content.decode("utf-8", errors="replace")
+            reader = csv.reader(io.StringIO(preview_text))
+            preview_rows = []
+            for _ in range(3):
+                row = next(reader, None)
+                if row is None:
+                    break
+                preview_rows.append(row)
+            logger.info("IMPORT: CSV preview rows=%s filename=%s company_id=%s", preview_rows, file.filename, tenant.company_id)
+        except Exception as preview_error:
+            logger.warning("IMPORT: CSV preview failed filename=%s company_id=%s error=%s", file.filename, tenant.company_id, preview_error)
+
         if len(content) > IMPORT_MAX_FILE_SIZE_BYTES:
             raise HTTPException(status_code=413, detail="File too large. Maximum allowed size is 10MB.")
 
@@ -1956,11 +1977,17 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
             "installations_imported": len(insert_payload),
             "scoring_triggered": scoring_triggered
         }
-    except HTTPException:
-        raise
     except Exception as e:
+        print("CSV ERROR:", str(e))
+        traceback.print_exc()
         logger.exception("IMPORT FAILED: %s", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "CSV processing failed",
+                "details": str(e)
+            }
+        )
 
 
 @app.post("/portfolio-scan")
