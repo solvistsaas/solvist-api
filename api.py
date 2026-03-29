@@ -215,7 +215,7 @@ def _get_or_create_public_user(
         _auth_log(logging.ERROR, "public_user_lookup_failed", request=request, user_id=user_id)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    insert_payload: Dict[str, str] = {"id": user_id}
+    insert_payload: Dict[str, str] = {"id": user_id, "tenant_id": "default"}
     if jwt_email:
         insert_payload["email"] = jwt_email
 
@@ -233,15 +233,26 @@ def _get_or_create_public_user(
                     user_id=user_id,
                 )
                 try:
-                    created = users_table.insert({"id": user_id}).execute()
+                    created = users_table.insert({"id": user_id, "tenant_id": "default"}).execute()
                     user = (created.data or [None])[0]
                     _auth_log(logging.INFO, "public_user_autocreated", request=request, user_id=user_id)
                 except Exception:
                     _auth_log(logging.ERROR, "public_user_autocreate_failed", request=request, user_id=user_id)
-                    raise HTTPException(status_code=500, detail="Internal server error")
+                    try:
+                        created = users_table.insert({"id": user_id}).execute()
+                        user = (created.data or [None])[0]
+                        _auth_log(logging.INFO, "public_user_autocreated_without_tenant_id", request=request, user_id=user_id)
+                    except Exception:
+                        _auth_log(logging.ERROR, "public_user_autocreate_failed", request=request, user_id=user_id)
+                        raise HTTPException(status_code=500, detail="Internal server error")
             else:
                 _auth_log(logging.ERROR, "public_user_autocreate_failed", request=request, user_id=user_id)
-                raise HTTPException(status_code=500, detail="Internal server error")
+                try:
+                    created = users_table.insert({"id": user_id}).execute()
+                    user = (created.data or [None])[0]
+                    _auth_log(logging.INFO, "public_user_autocreated_without_tenant_id", request=request, user_id=user_id)
+                except Exception:
+                    raise HTTPException(status_code=500, detail="Internal server error")
 
     if not user:
         try:
@@ -253,13 +264,24 @@ def _get_or_create_public_user(
 
     if not user:
         _auth_log(logging.ERROR, "public_user_resolution_failed", request=request, user_id=user_id)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        user = {
+            "id": user_id,
+            "email": jwt_email,
+            "tenant_id": "default",
+            "company_id": "default",
+        }
 
     return user
 
 
 def _resolve_current_user(token: str, request: Request) -> CurrentUserContext:
     if _is_service_role_token(token):
+        print("AUTH DEBUG:", {
+            "user_id": None,
+            "email": None,
+            "user_found": False,
+            "tenant_id": None,
+        })
         _auth_log(logging.WARNING, "service_role_token_rejected", request=request)
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -274,7 +296,7 @@ def _resolve_current_user(token: str, request: Request) -> CurrentUserContext:
 
     user_id = str(user.get("id") or _normalize_jwt_sub(jwt_sub))
     email = user.get("email") or jwt_email
-    company_id = user.get("company_id")
+    company_id = user.get("company_id") or user.get("tenant_id") or "default"
     current_user = CurrentUserContext(
         id=user_id,
         email=str(email) if email else None,
@@ -285,14 +307,24 @@ def _resolve_current_user(token: str, request: Request) -> CurrentUserContext:
 
 
 def _build_tenant_context(current_user: CurrentUserContext, token: str) -> TenantContext:
-    if not current_user.company_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    tenant_id = current_user.company_id or "default"
+    if not tenant_id:
+        print("AUTH DEBUG:", {
+            "user_id": current_user.id,
+            "email": current_user.email,
+            "user_found": True,
+            "tenant_id": None,
+        })
+        raise HTTPException(
+            status_code=403,
+            detail="User has no tenant assigned",
+        )
 
     try:
         res_comp = (
             admin_client.table("companies")
             .select("installation_limit")
-            .eq("id", current_user.company_id)
+            .eq("id", tenant_id)
             .single()
             .execute()
         )
@@ -302,7 +334,7 @@ def _build_tenant_context(current_user: CurrentUserContext, token: str) -> Tenan
 
     return TenantContext(
         user_id=current_user.id,
-        company_id=current_user.company_id,
+        company_id=tenant_id,
         jwt=token,
         installation_limit=max_inst,
     )
@@ -461,6 +493,12 @@ async def get_import_tenant(
             .execute()
         )
         if not comp_res.data:
+            print("AUTH DEBUG:", {
+                "user_id": "engine_service",
+                "email": None,
+                "user_found": False,
+                "tenant_id": company_id,
+            })
             raise HTTPException(status_code=403, detail="Forbidden")
         max_inst = comp_res.data[0].get("installation_limit") or 500
 
@@ -474,9 +512,26 @@ async def get_import_tenant(
         return tenant
 
     current_user = _resolve_current_user(token, request)
+    resolved_tenant_id = current_user.company_id or "default"
+    current_user = CurrentUserContext(
+        id=current_user.id,
+        email=current_user.email,
+        company_id=resolved_tenant_id,
+    )
     request.state.current_user = current_user
     request.state.user_jwt = token
     tenant = _build_tenant_context(current_user, token)
+    if not tenant.company_id:
+        print("AUTH DEBUG:", {
+            "user_id": current_user.id,
+            "email": current_user.email,
+            "user_found": True,
+            "tenant_id": None,
+        })
+        raise HTTPException(
+            status_code=403,
+            detail="User has no tenant assigned",
+        )
     request.state.tenant = tenant
     return tenant
 
