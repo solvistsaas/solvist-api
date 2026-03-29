@@ -2575,18 +2575,39 @@ def opportunity_insights(request: Request, tenant: Tenant):
 
 @app.get("/api/commercial-dashboard")
 @limiter.limit("30/minute")
-def commercial_dashboard(request: Request, tenant: Tenant):
+def commercial_dashboard(request: Request, current_user: CurrentUser):
+    empty_dashboard = {
+        "currency": "EUR",
+        "total_systems": 0,
+        "total_pipeline_value": 0.0,
+        "total_opportunity_value": 0.0,
+        "weighted_forecast": 0.0,
+        "closed_revenue": 0.0,
+        "hot_leads_count": 0,
+        "clients": [],
+        "pipeline": [],
+    }
+
+    if not current_user.company_id:
+        logger.info("commercial_dashboard: user without company_id user_id=%s", current_user.id)
+        return empty_dashboard
+
+    user_jwt = getattr(request.state, "user_jwt", "")
+    if not user_jwt:
+        logger.warning("commercial_dashboard: missing user_jwt user_id=%s", current_user.id)
+        return empty_dashboard
+
     try:
-        db = scoped_client(tenant.jwt)
+        db = scoped_client(user_jwt)
         if not db:
             raise RuntimeError("Base de datos no inicializada")
 
-        res = db.rpc("get_commercial_dashboard_metrics", {"p_company_id": tenant.company_id}).execute()
+        res = db.rpc("get_commercial_dashboard_metrics", {"p_company_id": current_user.company_id}).execute()
 
         opportunity_value_res = (
             db.table("clients")
             .select("expected_value")
-            .eq("company_id", tenant.company_id)
+            .eq("company_id", current_user.company_id)
             .gte("score", 40)
             .execute()
         )
@@ -2601,21 +2622,15 @@ def commercial_dashboard(request: Request, tenant: Tenant):
                 "total_opportunity_value": float(total_opportunity_value),
                 "weighted_forecast": float(data.get("weighted_forecast") or 0),
                 "closed_revenue": float(data.get("closed_revenue") or 0),
-                "hot_leads_count": data.get("hot_leads_count", 0)
+                "hot_leads_count": data.get("hot_leads_count", 0),
+                "clients": [],
+                "pipeline": [],
             }
-    except Exception as e:
-        logger.error(f"Dashboard RPC Error: {str(e)}")
-        # Devolver fallback con ceros para que el frontend no rompa si hay un error temporal
-        
-    return {
-        "currency": "EUR",
-        "total_systems": 0,
-        "total_pipeline_value": 0.0,
-        "total_opportunity_value": 0.0,
-        "weighted_forecast": 0.0,
-        "closed_revenue": 0.0,
-        "hot_leads_count": 0
-    }
+    except Exception:
+        logger.exception("commercial_dashboard failed user_id=%s company_id=%s", current_user.id, current_user.company_id)
+
+    # Fallback con ceros para no romper frontend si no hay datos o hay error temporal.
+    return empty_dashboard
 
 
 @app.get("/api/top-priority")
@@ -2646,29 +2661,42 @@ def top_priority(request: Request, tenant: Tenant):
 
 @app.get("/api/weekly-priority")
 @limiter.limit("30/minute")
-def weekly_priority(request: Request, tenant: Tenant, limit: int = 10, min_priority: float = 0):
-    db = scoped_client(tenant.jwt)
-    safe_limit = max(1, min(limit, 100))
+def weekly_priority(request: Request, current_user: CurrentUser, limit: int = 10, min_priority: float = 0):
+    if not current_user.company_id:
+        logger.info("weekly_priority: user without company_id user_id=%s", current_user.id)
+        return []
 
-    res = (
-        db.table("clients")
-        .select("id, client_alias, opportunity_type, expected_value, close_probability, priority_score, status")
-        .eq("company_id", tenant.company_id)
-        .gte("score", 40)
-        .neq("status", "Closed")
-        .gte("priority_score", min_priority)
-        .order("priority_score", desc=True)
-        .limit(safe_limit)
-        .execute()
-    )
+    user_jwt = getattr(request.state, "user_jwt", "")
+    if not user_jwt:
+        logger.warning("weekly_priority: missing user_jwt user_id=%s", current_user.id)
+        return []
 
-    data = res.data or []
-    for row in data:
-        slug = row.get("opportunity_type")
-        row["opportunity_type_display"] = opportunity_display_es(slug)
-        row["status_display"] = pipeline_status_display_es(row.get("status"))
+    try:
+        db = scoped_client(user_jwt)
+        safe_limit = max(1, min(limit, 100))
 
-    return data
+        res = (
+            db.table("clients")
+            .select("id, client_alias, opportunity_type, expected_value, close_probability, priority_score, status")
+            .eq("company_id", current_user.company_id)
+            .gte("score", 40)
+            .neq("status", "Closed")
+            .gte("priority_score", min_priority)
+            .order("priority_score", desc=True)
+            .limit(safe_limit)
+            .execute()
+        )
+
+        data = res.data or []
+        for row in data:
+            slug = row.get("opportunity_type")
+            row["opportunity_type_display"] = opportunity_display_es(slug)
+            row["status_display"] = pipeline_status_display_es(row.get("status"))
+
+        return data
+    except Exception:
+        logger.exception("weekly_priority failed user_id=%s company_id=%s", current_user.id, current_user.company_id)
+        return []
 
 
 @app.get("/api/hot-leads")
@@ -2757,24 +2785,37 @@ def get_client_timeline(request: Request, client_id: str, tenant: Tenant):
 
 @app.get("/api/pipeline")
 @limiter.limit("30/minute")
-def pipeline(request: Request, tenant: AuthTenant):
-    db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
-    res = (
-        db.table("clients")
-        .select("id, client_alias, opportunity_type, expected_value, close_probability, score, priority_score, status, notes, estimated_annual_export_kwh, estimated_battery_savings, battery_payback_years, battery_opportunity_score, sales_script_long, sales_script_short, opportunity_reason")
-        .eq("company_id", tenant.company_id)
-        .gte("score", 40)
-        .order("priority_score", desc=True)
-        .limit(20)
-        .execute()
-    )
-    data = res.data or []
+def pipeline(request: Request, current_user: CurrentUser):
+    if not current_user.company_id:
+        logger.info("pipeline: user without company_id user_id=%s", current_user.id)
+        return []
 
-    for c in data:
-        slug = c.get("opportunity_type")
-        c["opportunity_type_display"] = opportunity_display_es(slug)
-        
-    return data
+    user_jwt = getattr(request.state, "user_jwt", "")
+    if not user_jwt:
+        logger.warning("pipeline: missing user_jwt user_id=%s", current_user.id)
+        return []
+
+    try:
+        db = scoped_client(user_jwt)
+        res = (
+            db.table("clients")
+            .select("id, client_alias, opportunity_type, expected_value, close_probability, score, priority_score, status, notes, estimated_annual_export_kwh, estimated_battery_savings, battery_payback_years, battery_opportunity_score, sales_script_long, sales_script_short, opportunity_reason")
+            .eq("company_id", current_user.company_id)
+            .gte("score", 40)
+            .order("priority_score", desc=True)
+            .limit(20)
+            .execute()
+        )
+        data = res.data or []
+
+        for c in data:
+            slug = c.get("opportunity_type")
+            c["opportunity_type_display"] = opportunity_display_es(slug)
+
+        return data
+    except Exception:
+        logger.exception("pipeline failed user_id=%s company_id=%s", current_user.id, current_user.company_id)
+        return []
 
 
 @app.get("/api/opportunities")
