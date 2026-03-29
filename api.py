@@ -1036,23 +1036,27 @@ def debug_auth(current_user: CurrentUser):
 
 
 @app.get("/api/debug/installations-count")
-def debug_installations_count(request: Request, current_user: CurrentUser):
-    tenant_id = current_user.company_id or "default"
-    user_jwt = getattr(request.state, "user_jwt", "")
-    if not user_jwt:
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-    db = scoped_client(user_jwt)
+def debug_installations_count():
+    tenant_id = "default"
     res = (
-        db.table("installations")
-        .select("id", count="exact")
-        .eq("company_id", tenant_id)
+        admin_client.table("installations")
+        .select("*")
+        .eq("tenant_id", tenant_id)
         .execute()
     )
-    count = res.count if hasattr(res, "count") and res.count is not None else len(res.data or [])
     return {
-        "count": count,
+        "count": len(res.data or []),
         "tenant_id": tenant_id,
+        "data": (res.data or [])[:5],
+    }
+
+
+@app.get("/debug/db")
+def debug_db():
+    res = admin_client.table("installations").select("*").execute()
+    return {
+        "count": len(res.data or []),
+        "data": (res.data or [])[:5],
     }
 
 
