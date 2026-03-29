@@ -321,6 +321,35 @@ async def get_current_user(
 CurrentUser = Annotated[CurrentUserContext, Depends(get_current_user)]
 
 
+async def get_optional_current_user(
+    request: Request,
+    credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
+) -> Optional[CurrentUserContext]:
+    if not credentials:
+        _auth_log(logging.INFO, "optional_auth_missing_credentials", request=request)
+        return None
+
+    try:
+        token = _extract_authorization_bearer(request, credentials)
+        current_user = _resolve_current_user(token, request)
+        request.state.current_user = current_user
+        request.state.user_jwt = token
+        return current_user
+    except HTTPException as exc:
+        _auth_log(
+            logging.WARNING,
+            f"optional_auth_failed_status_{exc.status_code}",
+            request=request,
+        )
+        return None
+    except Exception:
+        logger.exception("optional_auth_failed_unexpected")
+        return None
+
+
+OptionalCurrentUser = Annotated[Optional[CurrentUserContext], Depends(get_optional_current_user)]
+
+
 async def get_tenant(
     request: Request,
     current_user: CurrentUser,
@@ -2575,7 +2604,7 @@ def opportunity_insights(request: Request, tenant: Tenant):
 
 @app.get("/api/commercial-dashboard")
 @limiter.limit("30/minute")
-def commercial_dashboard(request: Request, current_user: CurrentUser):
+def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
     empty_dashboard = {
         "currency": "EUR",
         "total_systems": 0,
@@ -2587,6 +2616,10 @@ def commercial_dashboard(request: Request, current_user: CurrentUser):
         "clients": [],
         "pipeline": [],
     }
+
+    if not current_user:
+        logger.info("commercial_dashboard: no authenticated user context")
+        return empty_dashboard
 
     if not current_user.company_id:
         logger.info("commercial_dashboard: user without company_id user_id=%s", current_user.id)
@@ -2661,7 +2694,11 @@ def top_priority(request: Request, tenant: Tenant):
 
 @app.get("/api/weekly-priority")
 @limiter.limit("30/minute")
-def weekly_priority(request: Request, current_user: CurrentUser, limit: int = 10, min_priority: float = 0):
+def weekly_priority(request: Request, current_user: OptionalCurrentUser, limit: int = 10, min_priority: float = 0):
+    if not current_user:
+        logger.info("weekly_priority: no authenticated user context")
+        return []
+
     if not current_user.company_id:
         logger.info("weekly_priority: user without company_id user_id=%s", current_user.id)
         return []
@@ -2785,7 +2822,11 @@ def get_client_timeline(request: Request, client_id: str, tenant: Tenant):
 
 @app.get("/api/pipeline")
 @limiter.limit("30/minute")
-def pipeline(request: Request, current_user: CurrentUser):
+def pipeline(request: Request, current_user: OptionalCurrentUser):
+    if not current_user:
+        logger.info("pipeline: no authenticated user context")
+        return []
+
     if not current_user.company_id:
         logger.info("pipeline: user without company_id user_id=%s", current_user.id)
         return []
