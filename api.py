@@ -1154,9 +1154,15 @@ def score_all_installations(request: Request):
         logger.warning(f"ENGINE: Authentication failed from IP {get_remote_address(request)}")
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    # Trigger scoring job immediately via APScheduler (non-blocking)
-    scheduler.add_job(core_score_all_installations, "date")
-    return {"message": "Scoring triggered"}
+    try:
+        result = core_score_all_installations()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "message": "Scoring executed",
+        "result": result,
+    }
 
 @app.get("/api/portfolio-opportunity-value")
 @limiter.limit("20/minute")
