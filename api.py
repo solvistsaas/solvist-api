@@ -768,6 +768,7 @@ def core_score_all_installations():
 
     start_time = datetime.now(timezone.utc)
     logger.info("ENGINE: Starting full opportunity scoring run.")
+    print("SCORING START")
 
     try:
         # Fresh admin client to avoid stale schema cache
@@ -791,7 +792,7 @@ def core_score_all_installations():
 
         # 3. Iterate Per Company (Tenant Isolation)
         for company in companies:
-            company_id = company["id"]
+            company_id = str(company["id"]).strip()
             company_name = company.get("name", "Unknown")
             
             try:
@@ -821,6 +822,7 @@ def core_score_all_installations():
                 offset = 0
                 had_installations = False
                 while True:
+                    print("QUERYING INSTALLATIONS FOR COMPANY:", company_id)
                     inst_res = (
                         fresh_admin.table("installations")
                         .select("*")
@@ -831,6 +833,29 @@ def core_score_all_installations():
                     installations = inst_res.data or []
                     print("INSTALLATIONS FOUND:", len(installations))
                     total_installations_found += len(installations)
+
+                    # Legacy fallback for rows missing top-level company_id.
+                    if not installations:
+                        fallback_res = (
+                            fresh_admin.table("installations")
+                            .select("*")
+                            .range(offset, offset + SCORING_BATCH_SIZE - 1)
+                            .execute()
+                        )
+                        fallback_rows = fallback_res.data or []
+                        installations = []
+                        for row in fallback_rows:
+                            row_company_id = str(
+                                row.get("company_id")
+                                or (row.get("raw_payload") or {}).get("company_id")
+                                or ""
+                            ).strip()
+                            if row_company_id == company_id:
+                                if not row.get("company_id"):
+                                    row["company_id"] = company_id
+                                installations.append(row)
+                        print("FALLBACK INSTALLATIONS:", len(installations))
+                        total_installations_found += len(installations)
 
                     if not installations:
                         if not had_installations:
@@ -923,9 +948,9 @@ def core_score_all_installations():
                             clients_payload,
                             on_conflict="company_id,client_alias"
                         ).execute()
-                        clients_created = len(clients_upsert_res.data or [])
-                        total_clients_created += clients_created
-                        print("CLIENTS CREATED:", clients_created)
+                        clients_created = clients_upsert_res.data or []
+                        total_clients_created += len(clients_created)
+                        print("CLIENTS CREATED:", len(clients_created))
                         
                         # 3. Create Auto Alerts for High Value Opportunities
                         if clients_upsert_res.data:
@@ -2160,6 +2185,16 @@ async def import_installations(
         # Upsert in batches (dedupe by id)
         for row in insert_payload:
             row["company_id"] = company_id
+        missing_company_ids = [
+            row.get("id")
+            for row in insert_payload
+            if not str(row.get("company_id") or "").strip()
+        ]
+        if missing_company_ids:
+            raise HTTPException(
+                status_code=500,
+                detail="Invalid installation payload: missing company_id",
+            )
         for chunk in [insert_payload[i:i + 100] for i in range(0, len(insert_payload), 100)]:
             db.table("installations").upsert(chunk, on_conflict="id").execute()
         logger.info("IMPORT: Inserted %s installations for company_id=%s", len(insert_payload), company_id)
