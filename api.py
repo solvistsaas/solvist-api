@@ -202,6 +202,7 @@ def _is_service_role_token(token: str) -> bool:
 def _get_or_create_public_user(
     jwt_sub: str,
     jwt_email: Optional[str],
+    jwt_company_id: Optional[str],
     request: Optional[Request] = None,
 ) -> Dict:
     user_id = _normalize_jwt_sub(jwt_sub)
@@ -215,9 +216,12 @@ def _get_or_create_public_user(
         _auth_log(logging.ERROR, "public_user_lookup_failed", request=request, user_id=user_id)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    insert_payload: Dict[str, str] = {"id": user_id, "tenant_id": "default"}
+    insert_payload: Dict[str, str] = {"id": user_id}
     if jwt_email:
         insert_payload["email"] = jwt_email
+    if jwt_company_id:
+        insert_payload["company_id"] = jwt_company_id
+        insert_payload["tenant_id"] = jwt_company_id
 
     if not user:
         try:
@@ -233,7 +237,11 @@ def _get_or_create_public_user(
                     user_id=user_id,
                 )
                 try:
-                    created = users_table.insert({"id": user_id, "tenant_id": "default"}).execute()
+                    retry_payload: Dict[str, str] = {"id": user_id}
+                    if jwt_company_id:
+                        retry_payload["company_id"] = jwt_company_id
+                        retry_payload["tenant_id"] = jwt_company_id
+                    created = users_table.insert(retry_payload).execute()
                     user = (created.data or [None])[0]
                     _auth_log(logging.INFO, "public_user_autocreated", request=request, user_id=user_id)
                 except Exception:
@@ -267,9 +275,17 @@ def _get_or_create_public_user(
         user = {
             "id": user_id,
             "email": jwt_email,
-            "tenant_id": "default",
-            "company_id": "default",
+            "tenant_id": jwt_company_id,
+            "company_id": jwt_company_id,
         }
+
+    if user and jwt_company_id and not user.get("company_id"):
+        try:
+            users_table.update({"company_id": jwt_company_id, "tenant_id": jwt_company_id}).eq("id", user_id).execute()
+            user["company_id"] = jwt_company_id
+            user["tenant_id"] = jwt_company_id
+        except Exception:
+            _auth_log(logging.WARNING, "public_user_company_backfill_failed", request=request, user_id=user_id)
 
     return user
 
@@ -292,11 +308,17 @@ def _resolve_current_user(token: str, request: Request) -> CurrentUserContext:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     jwt_email = payload.get("email")
-    user = _get_or_create_public_user(jwt_sub, jwt_email, request=request)
+    jwt_company_id = (
+        payload.get("company_id")
+        or payload.get("tenant_id")
+        or (payload.get("app_metadata") or {}).get("company_id")
+        or (payload.get("user_metadata") or {}).get("company_id")
+    )
+    user = _get_or_create_public_user(jwt_sub, jwt_email, jwt_company_id, request=request)
 
     user_id = str(user.get("id") or _normalize_jwt_sub(jwt_sub))
     email = user.get("email") or jwt_email
-    company_id = user.get("company_id") or user.get("tenant_id") or "default"
+    company_id = user.get("company_id") or user.get("tenant_id") or jwt_company_id
     current_user = CurrentUserContext(
         id=user_id,
         email=str(email) if email else None,
@@ -307,7 +329,7 @@ def _resolve_current_user(token: str, request: Request) -> CurrentUserContext:
 
 
 def _build_tenant_context(current_user: CurrentUserContext, token: str) -> TenantContext:
-    tenant_id = current_user.company_id or "default"
+    tenant_id = current_user.company_id
     if not tenant_id:
         print("AUTH DEBUG:", {
             "user_id": current_user.id,
@@ -511,7 +533,7 @@ async def get_import_tenant(
         return tenant
 
     current_user = _resolve_current_user(token, request)
-    resolved_tenant_id = current_user.company_id or "default"
+    resolved_tenant_id = current_user.company_id
     current_user = CurrentUserContext(
         id=current_user.id,
         email=current_user.email,
@@ -1036,26 +1058,19 @@ def debug_auth(current_user: CurrentUser):
 
 
 @app.get("/api/debug/installations-count")
-def debug_installations_count():
-    tenant_id = "default"
+def debug_installations_count(current_user: CurrentUser):
+    company_id = current_user.company_id
+    if not company_id:
+        raise HTTPException(status_code=403, detail="User has no tenant assigned")
     res = (
         admin_client.table("installations")
         .select("*")
-        .eq("tenant_id", tenant_id)
+        .eq("company_id", company_id)
         .execute()
     )
     return {
         "count": len(res.data or []),
-        "tenant_id": tenant_id,
-        "data": (res.data or [])[:5],
-    }
-
-
-@app.get("/debug/db")
-def debug_db():
-    res = admin_client.table("installations").select("*").execute()
-    return {
-        "count": len(res.data or []),
+        "company_id": company_id,
         "data": (res.data or [])[:5],
     }
 
@@ -1700,6 +1715,7 @@ def _parse_installations_from_dataframe(
         insert_payload.append(
             {
                 "id": stable_id,
+                "company_id": company_id,
                 "system_size_kwp": float(kwp),
                 "installation_year": int(year) if year else None,  # Will use default in scoring engine
                 "country": country_value,
@@ -2002,14 +2018,23 @@ def create_installation(
 #   -F "file=@test.csv"
 @app.post("/api/import/installations")
 @limiter.limit("5/minute")
-async def import_installations(request: Request, tenant: ImportTenant, file: UploadFile = File(...)):
+async def import_installations(
+    request: Request,
+    tenant: ImportTenant,
+    current_user: CurrentUser,
+    file: UploadFile = File(...),
+):
+    company_id = current_user.company_id
+    if not company_id:
+        raise HTTPException(status_code=403, detail="User has no tenant assigned")
+
     print("IMPORT START", {
         "filename": file.filename if file else None,
         "content_type": file.content_type if file else None,
     })
     print("IMPORT USER CONTEXT", {
-        "user_id": tenant.user_id,
-        "tenant_id": tenant.company_id,
+        "user_id": current_user.id,
+        "tenant_id": company_id,
     })
 
     if not file:
@@ -2019,7 +2044,7 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
 
     row_count = 0
     db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
-    logger.info("IMPORT: Received CSV upload filename=%s company_id=%s", file.filename, tenant.company_id)
+    logger.info("IMPORT: Received CSV upload filename=%s company_id=%s", file.filename, company_id)
     import_started_at = datetime.now(timezone.utc)
 
     try:
@@ -2034,7 +2059,7 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
 
         content = await file.read()
         file_size = len(content)
-        logger.info("IMPORT: CSV file size=%s bytes filename=%s company_id=%s", file_size, file.filename, tenant.company_id)
+        logger.info("IMPORT: CSV file size=%s bytes filename=%s company_id=%s", file_size, file.filename, company_id)
         try:
             preview_text = content.decode("utf-8", errors="replace")
             reader = csv.reader(io.StringIO(preview_text))
@@ -2044,9 +2069,9 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
                 if row is None:
                     break
                 preview_rows.append(row)
-            logger.info("IMPORT: CSV preview rows=%s filename=%s company_id=%s", preview_rows, file.filename, tenant.company_id)
+            logger.info("IMPORT: CSV preview rows=%s filename=%s company_id=%s", preview_rows, file.filename, company_id)
         except Exception as preview_error:
-            logger.warning("IMPORT: CSV preview failed filename=%s company_id=%s error=%s", file.filename, tenant.company_id, preview_error)
+            logger.warning("IMPORT: CSV preview failed filename=%s company_id=%s error=%s", file.filename, company_id, preview_error)
 
         try:
             row_count = max(0, len(preview_text.splitlines()) - 1)
@@ -2058,26 +2083,38 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
 
         insert_payload = _parse_installations_from_csv_bytes(
             content,
-            company_id=tenant.company_id,
+            company_id=company_id,
             alias_prefix="PV",
         )
-        logger.info("IMPORT: Parsed %s valid installations for company_id=%s", len(insert_payload), tenant.company_id)
+        logger.info("IMPORT: Parsed %s valid installations for company_id=%s", len(insert_payload), company_id)
         if not insert_payload:
             raise HTTPException(status_code=400, detail="No valid installations found in CSV")
 
-        # Check plan limit against rows being imported (no company_id column on installations table)
-        current_count = 0
+        # Check plan limit against rows being imported for the authenticated company
+        current_count_res = (
+            db.table("installations")
+            .select("id", count="exact")
+            .eq("company_id", company_id)
+            .execute()
+        )
+        current_count = (
+            current_count_res.count
+            if hasattr(current_count_res, "count") and current_count_res.count is not None
+            else len(current_count_res.data or [])
+        )
         
         if current_count + len(insert_payload) > tenant.installation_limit:
             raise HTTPException(status_code=402, detail=f"Plan limit exceeded. Would reach {current_count + len(insert_payload)} but max is {tenant.installation_limit}")
             
         # Upsert in batches (dedupe by id)
+        for row in insert_payload:
+            row["company_id"] = company_id
         for chunk in [insert_payload[i:i + 100] for i in range(0, len(insert_payload), 100)]:
             db.table("installations").upsert(chunk, on_conflict="id").execute()
-        logger.info("IMPORT: Inserted %s installations for company_id=%s", len(insert_payload), tenant.company_id)
+        logger.info("IMPORT: Inserted %s installations for company_id=%s", len(insert_payload), company_id)
         print("DB INSERT CHECK", {
             "rows_inserted": len(insert_payload),
-            "tenant_id": tenant.company_id,
+            "tenant_id": company_id,
         })
             
         # Trigger engine job automatically after importing (non-blocking)
@@ -2086,7 +2123,7 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
             scheduler.add_job(core_score_all_installations, 'date')
             scoring_triggered = True
         except Exception as scoring_error:
-            logger.warning("IMPORT: scoring trigger failed for company_id=%s error=%s", tenant.company_id, scoring_error)
+            logger.warning("IMPORT: scoring trigger failed for company_id=%s error=%s", company_id, scoring_error)
 
         duration_seconds = (datetime.now(timezone.utc) - import_started_at).total_seconds()
         LAST_IMPORT_STATUS["last_import_rows"] = len(insert_payload)
@@ -2096,7 +2133,7 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
         logger.info(
             "import_completed",
             extra={
-                "company_id": tenant.company_id,
+                "company_id": company_id,
                 "installations_imported": len(insert_payload),
                 "opportunities_generated": 0,
                 "duration_seconds": round(duration_seconds, 3),
@@ -2106,13 +2143,13 @@ async def import_installations(request: Request, tenant: ImportTenant, file: Upl
 
         print("IMPORT SUCCESS", {
             "rows_processed": row_count if row_count else "unknown",
-            "tenant_id": tenant.company_id,
+            "tenant_id": company_id,
         })
 
         return {
             "success": True,
             "rows_processed": row_count if row_count else len(insert_payload),
-            "tenant_id": tenant.company_id,
+            "tenant_id": company_id,
             "installations_imported": len(insert_payload),
             "scoring_triggered": scoring_triggered
         }
@@ -2802,7 +2839,7 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
             logger.info("commercial_dashboard: no authenticated user context")
             return empty_dashboard
 
-        tenant_id = current_user.company_id or "default"
+        tenant_id = current_user.company_id
 
         if not tenant_id:
             logger.info("commercial_dashboard: user without company_id user_id=%s", current_user.id)
@@ -2819,10 +2856,6 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
 
         logger.info("commercial_dashboard: fetching dashboard metrics for company_id=%s", tenant_id)
         res = db.rpc("get_commercial_dashboard_metrics", {"p_company_id": tenant_id}).execute()
-        print("DASHBOARD QUERY", {
-            "tenant_id": tenant_id,
-            "systems_found": len(res.data or []),
-        })
 
         logger.info("commercial_dashboard: fetching opportunity value rows for company_id=%s", tenant_id)
         opportunity_value_res = (
@@ -2833,7 +2866,7 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
             .execute()
         )
         total_opportunity_value = sum(float(row.get("expected_value") or 0) for row in (opportunity_value_res.data or []))
-        
+
         if res.data:
             data = res.data[0]
             return {
@@ -2847,7 +2880,6 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
                 "clients": [],
                 "pipeline": [],
             }
-            return _json_safe(payload)
 
         return empty_dashboard
     except Exception:
