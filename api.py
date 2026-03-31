@@ -424,8 +424,15 @@ async def get_tenant(
 Tenant = Annotated[TenantContext, Depends(get_tenant)]
 
 
+def normalize_secret(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return value.strip().replace("\n", "").replace("\r", "")
+
+
 def _normalize_secret(value: Optional[str]) -> str:
-    return (value or "").strip().strip('"').strip("'").strip()
+    # Backward-compatible wrapper for existing call sites.
+    return normalize_secret(value)
 
 
 def parse_bearer_token(auth_header: Optional[str]) -> str:
@@ -752,7 +759,6 @@ limiter = Limiter(key_func=_tenant_key, default_limits=["60/minute"])
 # SCORING ENGINE
 # ------------------------------------
 
-ENGINE_SECRET = _normalize_secret(os.getenv("ENGINE_SECRET"))
 scoring_lock = Lock()
 
 def core_score_all_installations():
@@ -1006,7 +1012,8 @@ scheduler = BackgroundScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Startup begin")
-    print("LOADED ENGINE_SECRET:", _normalize_secret(os.getenv("ENGINE_SECRET")))
+    loaded_engine_secret = normalize_secret(os.getenv("ENGINE_SECRET"))
+    print("ENGINE_SECRET LOADED:", bool(loaded_engine_secret))
     # FIX #3: Initialize Supabase admin client at startup, not at module import time
     global admin_client
     try:
@@ -1017,7 +1024,7 @@ async def lifespan(app: FastAPI):
         raise
 
     # FIX #2: Validate ENGINE_SECRET at startup (warn only — don't crash the server)
-    if not os.getenv("ENGINE_SECRET"):
+    if not loaded_engine_secret:
         logger.warning("ENGINE_SECRET not configured — /api/engine/score-all will return 403.")
 
     try:
@@ -1120,17 +1127,30 @@ def score_all_installations(request: Request):
     """
     Monthly Serverless Job endpoint. Can be triggered manually.
     """
-    expected_engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
-    provided_secret = _normalize_secret(request.headers.get("X-ENGINE-SECRET"))
-    print("EXPECTED ENGINE_SECRET:", expected_engine_secret)
-    print("RECEIVED HEADER:", request.headers.get("X-ENGINE-SECRET"))
-    print("ALL HEADERS:", dict(request.headers))
+    expected_secret = os.getenv("ENGINE_SECRET")
+    provided_secret = (
+        request.headers.get("X-ENGINE-SECRET")
+        or request.headers.get("x-engine-secret")
+        or request.headers.get("Authorization")
+    )
+    if provided_secret and provided_secret.startswith("Bearer "):
+        provided_secret = provided_secret.replace("Bearer ", "", 1)
 
-    if not expected_engine_secret or not provided_secret:
+    normalized_expected = normalize_secret(expected_secret)
+    normalized_provided = normalize_secret(provided_secret)
+
+    print("ENGINE_SECRET LOADED:", bool(normalized_expected))
+    print("SECRET RECEIVED:", bool(normalized_provided))
+    print("MATCH RESULT:", normalized_provided == normalized_expected)
+
+    if not normalized_expected:
+        raise RuntimeError("ENGINE_SECRET not configured")
+
+    if not normalized_provided:
         logger.warning(f"ENGINE: Missing secret(s) from IP {get_remote_address(request)}")
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    if not secrets.compare_digest(provided_secret.strip(), expected_engine_secret.strip()):
+    if not secrets.compare_digest(normalized_provided, normalized_expected):
         logger.warning(f"ENGINE: Authentication failed from IP {get_remote_address(request)}")
         raise HTTPException(status_code=403, detail="Forbidden")
 
