@@ -777,6 +777,8 @@ def core_score_all_installations():
         
         total_companies = len(companies)
         total_installations_scored = 0
+        total_installations_found = 0
+        total_clients_created = 0
         companies_failed = 0
         
         logger.info(f"ENGINE: Found {total_companies} companies to process.")
@@ -821,6 +823,8 @@ def core_score_all_installations():
                         .execute()
                     )
                     installations = inst_res.data or []
+                    print("INSTALLATIONS FOUND:", len(installations))
+                    total_installations_found += len(installations)
 
                     if not installations:
                         if not had_installations:
@@ -913,6 +917,9 @@ def core_score_all_installations():
                             clients_payload,
                             on_conflict="company_id,client_alias"
                         ).execute()
+                        clients_created = len(clients_upsert_res.data or [])
+                        total_clients_created += clients_created
+                        print("CLIENTS CREATED:", clients_created)
                         
                         # 3. Create Auto Alerts for High Value Opportunities
                         if clients_upsert_res.data:
@@ -961,7 +968,15 @@ def core_score_all_installations():
                 companies_failed += 1
                 # 4. Basic Transaction Safety Logic: Catch error and continue loop
         runtime_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
-        logger.info(f"ENGINE: Run complete. Scored {total_installations_scored} installations across {total_companies - companies_failed} companies. Failed: {companies_failed}. Runtime: {runtime_seconds:.2f}s")
+        logger.info(
+            "ENGINE: Run complete. Scored %s installations (found=%s, clients_created=%s) across %s companies. Failed: %s. Runtime: %.2fs",
+            total_installations_scored,
+            total_installations_found,
+            total_clients_created,
+            total_companies - companies_failed,
+            companies_failed,
+            runtime_seconds,
+        )
         
         try:
             fresh_admin.table("execution_tracking").insert({
@@ -991,6 +1006,7 @@ scheduler = BackgroundScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Startup begin")
+    print("LOADED ENGINE_SECRET:", _normalize_secret(os.getenv("ENGINE_SECRET")))
     # FIX #3: Initialize Supabase admin client at startup, not at module import time
     global admin_client
     try:
@@ -1104,8 +1120,17 @@ def score_all_installations(request: Request):
     """
     Monthly Serverless Job endpoint. Can be triggered manually.
     """
-    provided = _normalize_secret(request.headers.get("X-ENGINE-SECRET"))
-    if not provided or not ENGINE_SECRET or not secrets.compare_digest(provided, ENGINE_SECRET):
+    expected_engine_secret = _normalize_secret(os.getenv("ENGINE_SECRET"))
+    provided_secret = _normalize_secret(request.headers.get("X-ENGINE-SECRET"))
+    print("EXPECTED ENGINE_SECRET:", expected_engine_secret)
+    print("RECEIVED HEADER:", request.headers.get("X-ENGINE-SECRET"))
+    print("ALL HEADERS:", dict(request.headers))
+
+    if not expected_engine_secret or not provided_secret:
+        logger.warning(f"ENGINE: Missing secret(s) from IP {get_remote_address(request)}")
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not secrets.compare_digest(provided_secret.strip(), expected_engine_secret.strip()):
         logger.warning(f"ENGINE: Authentication failed from IP {get_remote_address(request)}")
         raise HTTPException(status_code=403, detail="Forbidden")
 
