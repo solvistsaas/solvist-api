@@ -1124,14 +1124,17 @@ scheduler = BackgroundScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global admin_client
     logger.info("Startup begin")
     loaded_engine_secret = normalize_secret(os.getenv("ENGINE_SECRET"))
     print("ENGINE_SECRET LOADED:", bool(loaded_engine_secret))
+    print("SUPABASE URL:", SUPABASE_URL)
+    print("ADMIN CLIENT INITIALIZED:", bool(admin_client))
     # FIX #3: Initialize Supabase admin client at startup, not at module import time
-    global admin_client
     try:
         admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
         logger.info("Supabase admin client initialized.")
+        print("ADMIN CLIENT INITIALIZED:", bool(admin_client))
     except Exception:
         logger.exception("Startup failed: Supabase client init error")
         raise
@@ -1213,25 +1216,70 @@ def debug_installations_count(current_user: CurrentUser):
 
 @app.get("/api/debug/full-dump")
 def debug_full_dump():
-    companies = admin_client.table("companies").select("*").execute().data or []
-    print("COMPANIES:", companies)
+    try:
+        companies = admin_client.table("companies").select("*").execute()
+        print("COMPANIES RAW RESPONSE:", companies)
+        companies_data = companies.data or []
+    except Exception as e:
+        print("ERROR COMPANIES:", str(e))
+        companies_data = []
 
-    installations = admin_client.table("installations").select("*").execute().data or []
-    print("INSTALLATIONS:", installations)
+    try:
+        installations = admin_client.table("installations").select("*").execute()
+        print("INSTALLATIONS RAW RESPONSE:", installations)
+        installations_data = installations.data or []
+    except Exception as e:
+        print("ERROR INSTALLATIONS:", str(e))
+        installations_data = []
 
-    clients = admin_client.table("clients").select("*").execute().data or []
-    print("CLIENTS:", clients)
+    try:
+        clients = admin_client.table("clients").select("*").execute()
+        print("CLIENTS RAW RESPONSE:", clients)
+        clients_data = clients.data or []
+    except Exception as e:
+        print("ERROR CLIENTS:", str(e))
+        clients_data = []
 
     return {
-        "companies": companies,
-        "installations": installations,
-        "clients": clients,
+        "companies": companies_data,
+        "installations": installations_data,
+        "clients": clients_data,
         "counts": {
-            "companies": len(companies),
-            "installations": len(installations),
-            "clients": len(clients),
+            "companies": len(companies_data),
+            "installations": len(installations_data),
+            "clients": len(clients_data),
         },
     }
+
+
+@app.get("/api/debug/test-company-loop")
+def test_company_loop():
+    companies = admin_client.table("companies").select("*").execute().data or []
+
+    result = []
+
+    for company in companies:
+        try:
+            raw_company_id = company.get("id") or company.get("company_id")
+            company_id = str(raw_company_id).strip() if raw_company_id else None
+
+            installations = admin_client.table("installations").select("*").execute().data or []
+
+            result.append({
+                "company": company,
+                "company_id": company_id,
+                "installations_count": len(installations),
+                "status": "OK"
+            })
+
+        except Exception as e:
+            result.append({
+                "company": company,
+                "error": str(e),
+                "status": "ERROR"
+            })
+
+    return result
 
 
 def _request_id_for(request: Request) -> str:
