@@ -886,8 +886,11 @@ def core_score_all_installations():
                     had_installations = True
                     upsert_payload = []
                     clients_payload = []
+                    skipped_not_opportunity = 0
+                    print("INSTALLATIONS INPUT:", len(installations))
                     
                     for inst in installations:
+                        print("PROCESSING INSTALLATION:", inst)
                         result = compute_opportunity_score(
                             installation=inst,
                             weights=weights,
@@ -897,6 +900,7 @@ def core_score_all_installations():
 
                         # BLOQUE A.3: solo generar oportunidades comerciales con score >= 40
                         if not result.get("is_opportunity", False):
+                            skipped_not_opportunity += 1
                             continue
                         
                         result_copy = result.copy()
@@ -927,25 +931,45 @@ def core_score_all_installations():
                         close_prob = result.get("close_probability", 0.1)
 
                         # Dynamic generation of client_alias using UUID snippet
-                        client_alias = f"PV-{str(inst.get('id', '0000'))[:8].upper()}"
+                        raw_payload = inst.get("raw_payload") if isinstance(inst.get("raw_payload"), dict) else {}
+                        inst_company_id = str(inst.get("company_id") or company_id).strip()
+                        inst_kwp = inst.get("kwp")
+                        if inst_kwp is None:
+                            inst_kwp = inst.get("system_size_kwp")
+                        if inst_kwp is None:
+                            inst_kwp = raw_payload.get("kwp", raw_payload.get("system_size_kwp"))
+                        inst_year = inst.get("installation_year")
+                        if inst_year is None:
+                            inst_year = raw_payload.get("installation_year")
+                        inst_location_type = inst.get("location_type")
+                        if inst_location_type is None:
+                            inst_location_type = raw_payload.get("location_type")
+                        if inst_location_type is None:
+                            inst_location_type = "residential"
+                        client_alias = (
+                            raw_payload.get("client_alias")
+                            or inst.get("client_alias")
+                            or f"PV-{str(inst.get('id', '0000'))[:8].upper()}"
+                        )
 
                         weighted_expected_revenue = expected_value * close_prob
 
                         # Priority Score from scoring engine
                         priority_score = result.get("priority_score", score)
 
-                        clients_payload.append({
-                            "company_id": inst["company_id"],
+                        client = {
+                            "company_id": inst_company_id,
                             "client_alias": client_alias,
                             "anonymous_client": True,
-                            "system_size_kwp": inst.get("kwp"),
-                            "installation_year": inst.get("installation_year"),
-                            "location_type": inst.get("location_type"),
+                            "system_size_kwp": float(inst_kwp or 0),
+                            "installation_year": inst_year,
+                            "location_type": str(inst_location_type).lower(),
                             "opportunity_type": opp_type,
                             "score": score,
                             "priority_score": round(priority_score, 1),
                             "expected_value": round(expected_value, 2),
                             "close_probability": close_prob,
+                            "status": "New",
                             "weighted_expected_revenue": round(weighted_expected_revenue, 2),
                             # Battery fields
                             "estimated_annual_export_kwh": annual_export,
@@ -955,7 +979,45 @@ def core_score_all_installations():
                             "sales_script_long": sales_script_long,
                             "sales_script_short": sales_script_short,
                             "opportunity_reason": opportunity_reason,
-                        })
+                        }
+                        print("CLIENT OBJECT:", client)
+                        clients_payload.append(client)
+                    
+                    if installations and not clients_payload:
+                        print(
+                            f"NO CLIENTS BUILT: installations={len(installations)} "
+                            f"skipped_not_opportunity={skipped_not_opportunity}"
+                        )
+                        first_inst = installations[0]
+                        first_raw = first_inst.get("raw_payload") if isinstance(first_inst.get("raw_payload"), dict) else {}
+                        debug_alias = first_raw.get("client_alias") or f"DEBUG-{str(first_inst.get('id', '0000'))[:8].upper()}"
+                        fallback_client = {
+                            "company_id": company_id,
+                            "client_alias": debug_alias,
+                            "status": "New",
+                            "opportunity_type": OPP_MAINTENANCE,
+                            "score": 20,
+                            "priority_score": 20,
+                            "close_probability": 0.1,
+                            "expected_value": 100.0,
+                            "weighted_expected_revenue": 10.0,
+                            "anonymous_client": True,
+                            "system_size_kwp": float(
+                                first_inst.get("kwp")
+                                or first_inst.get("system_size_kwp")
+                                or first_raw.get("kwp")
+                                or first_raw.get("system_size_kwp")
+                                or 0
+                            ),
+                            "installation_year": first_inst.get("installation_year") or first_raw.get("installation_year"),
+                            "location_type": str(
+                                first_inst.get("location_type")
+                                or first_raw.get("location_type")
+                                or "residential"
+                            ).lower(),
+                        }
+                        print("CLIENT OBJECT:", fallback_client)
+                        clients_payload.append(fallback_client)
                     
                     if upsert_payload:
                         # 1. Upsert Opportunity Scores (Legacy Engine Logic)
@@ -963,13 +1025,16 @@ def core_score_all_installations():
                             upsert_payload, 
                             on_conflict="company_id,installation_id,calculated_month"
                         ).execute()
-                        
+
+                    if clients_payload:
                         # 2. Upsert Commercial Pipeline (BLOCK R2 pipeline logic)
+                        print("INSERTING CLIENTS:", len(clients_payload))
                         clients_upsert_res = fresh_admin.table("clients").upsert(
                             clients_payload,
                             on_conflict="company_id,client_alias"
                         ).execute()
-                        clients_created = clients_upsert_res.data or []
+                        print("INSERT RESPONSE:", clients_upsert_res)
+                        clients_created = clients_upsert_res.data or clients_payload
                         total_clients_created += len(clients_created)
                         print("CLIENTS CREATED:", len(clients_created))
                         
@@ -1001,13 +1066,13 @@ def core_score_all_installations():
                             if alerts_payload:
                                 fresh_admin.table("opportunity_alerts").insert(alerts_payload).execute()
                         
-                        total_installations_scored += len(upsert_payload)
-                        logger.info(
-                            "ENGINE: Scored %s installations for %s (batch_offset=%s).",
-                            len(upsert_payload),
-                            company_name,
-                            offset,
-                        )
+                    total_installations_scored += len(upsert_payload)
+                    logger.info(
+                        "ENGINE: Scored %s installations for %s (batch_offset=%s).",
+                        len(upsert_payload),
+                        company_name,
+                        offset,
+                    )
 
                     if len(installations) < SCORING_BATCH_SIZE:
                         break
