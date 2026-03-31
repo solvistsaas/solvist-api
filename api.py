@@ -781,6 +781,7 @@ def core_score_all_installations():
         # 2. Prevent Full-Table Scan: Fetch companies first
         comp_res = fresh_admin.table("companies").select("id, name").execute()
         companies = comp_res.data or []
+        print("TOTAL COMPANIES:", len(companies))
         
         total_companies = len(companies)
         total_installations_scored = 0
@@ -792,7 +793,24 @@ def core_score_all_installations():
 
         # 3. Iterate Per Company (Tenant Isolation)
         for company in companies:
-            company_id = str(company["id"]).strip()
+            print("PROCESSING COMPANY:", company)
+            print("COMPANY RAW:", company)
+            print("COMPANY ID FIELD:", company.get("id"))
+            print("COMPANY COMPANY_ID FIELD:", company.get("company_id"))
+
+            raw_company_id = company.get("id") or company.get("company_id")
+            if not raw_company_id:
+                print("ERROR IN COMPANY LOOP:", "Missing company id in company row")
+                print("FAILING COMPANY:", company)
+                companies_failed += 1
+                continue
+
+            company_id = str(raw_company_id).strip()
+            if not company_id:
+                print("ERROR IN COMPANY LOOP:", "Empty company id after normalization")
+                print("FAILING COMPANY:", company)
+                companies_failed += 1
+                continue
             company_name = company.get("name", "Unknown")
             
             try:
@@ -822,6 +840,7 @@ def core_score_all_installations():
                 offset = 0
                 had_installations = False
                 while True:
+                    print("QUERYING INSTALLATIONS WITH:", company_id)
                     print("QUERYING INSTALLATIONS FOR COMPANY:", company_id)
                     inst_res = (
                         fresh_admin.table("installations")
@@ -830,12 +849,14 @@ def core_score_all_installations():
                         .range(offset, offset + SCORING_BATCH_SIZE - 1)
                         .execute()
                     )
+                    print("INSTALLATIONS QUERY RESPONSE:", bool(inst_res))
                     installations = inst_res.data or []
                     print("INSTALLATIONS FOUND:", len(installations))
                     total_installations_found += len(installations)
 
                     # Legacy fallback for rows missing top-level company_id.
                     if not installations:
+                        print("TRYING FALLBACK QUERY")
                         fallback_res = (
                             fresh_admin.table("installations")
                             .select("*")
@@ -994,6 +1015,8 @@ def core_score_all_installations():
                     
             except Exception as e:
                 import traceback
+                print("ERROR IN COMPANY LOOP:", str(e))
+                print("FAILING COMPANY:", company)
                 logger.error(f"ENGINE: Failed to process company {company_name} ({company_id}): {str(e)}")
                 logger.error(f"ENGINE TRACEBACK: {traceback.format_exc()}")
                 companies_failed += 1
@@ -2112,6 +2135,7 @@ async def import_installations(
         "user_id": current_user.id,
         "tenant_id": company_id,
     })
+    print("IMPORT COMPANY_ID:", company_id)
 
     if not file:
         raise HTTPException(status_code=400, detail="No file uploaded")
@@ -2198,6 +2222,7 @@ async def import_installations(
         for chunk in [insert_payload[i:i + 100] for i in range(0, len(insert_payload), 100)]:
             db.table("installations").upsert(chunk, on_conflict="id").execute()
         logger.info("IMPORT: Inserted %s installations for company_id=%s", len(insert_payload), company_id)
+        print("ROWS INSERTED:", len(insert_payload))
         print("DB INSERT CHECK", {
             "rows_inserted": len(insert_payload),
             "tenant_id": company_id,
