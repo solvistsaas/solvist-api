@@ -767,19 +767,17 @@ def core_score_all_installations():
         return {"message": "Scoring already running", "skipped": True}
 
     start_time = datetime.now(timezone.utc)
+    print("USING ADMIN CLIENT FOR SCORING")
     logger.info("ENGINE: Starting full opportunity scoring run.")
     print("SCORING START")
 
     try:
-        # Fresh admin client to avoid stale schema cache
-        fresh_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
         # PREP FOR BLOCK 1: Set calculated_month to first day of current month
         calculated_month = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
         now_year = start_time.year
 
         # 2. Prevent Full-Table Scan: Fetch companies first
-        comp_res = fresh_admin.table("companies").select("id, name").execute()
+        comp_res = admin_client.table("companies").select("id, name").execute()
         companies = comp_res.data or []
         print("TOTAL COMPANIES:", len(companies))
         
@@ -818,7 +816,7 @@ def core_score_all_installations():
                 
                 # BLOCK 2: Fetch Company Parameters (1 fetch per tenant)
                 try:
-                    comp_param_res = fresh_admin.table("company_parameters").select("*").eq("company_id", company_id).execute()
+                    comp_param_res = admin_client.table("company_parameters").select("*").eq("company_id", company_id).execute()
                     comp_params = comp_param_res.data[0] if comp_param_res.data else {}
                 except Exception:
                     comp_params = {}
@@ -843,7 +841,7 @@ def core_score_all_installations():
                     print("QUERYING INSTALLATIONS WITH:", company_id)
                     print("QUERYING INSTALLATIONS FOR COMPANY:", company_id)
                     inst_res = (
-                        fresh_admin.table("installations")
+                        admin_client.table("installations")
                         .select("*")
                         .eq("company_id", company_id)
                         .range(offset, offset + SCORING_BATCH_SIZE - 1)
@@ -858,7 +856,7 @@ def core_score_all_installations():
                     if not installations:
                         print("TRYING FALLBACK QUERY")
                         fallback_res = (
-                            fresh_admin.table("installations")
+                            admin_client.table("installations")
                             .select("*")
                             .range(offset, offset + SCORING_BATCH_SIZE - 1)
                             .execute()
@@ -1021,7 +1019,7 @@ def core_score_all_installations():
                     
                     if upsert_payload:
                         # 1. Upsert Opportunity Scores (Legacy Engine Logic)
-                        fresh_admin.table("opportunity_scores").upsert(
+                        admin_client.table("opportunity_scores").upsert(
                             upsert_payload, 
                             on_conflict="company_id,installation_id,calculated_month"
                         ).execute()
@@ -1029,7 +1027,7 @@ def core_score_all_installations():
                     if clients_payload:
                         # 2. Upsert Commercial Pipeline (BLOCK R2 pipeline logic)
                         print("INSERTING CLIENTS:", len(clients_payload))
-                        clients_upsert_res = fresh_admin.table("clients").upsert(
+                        clients_upsert_res = admin_client.table("clients").upsert(
                             clients_payload,
                             on_conflict="company_id,client_alias"
                         ).execute()
@@ -1041,7 +1039,7 @@ def core_score_all_installations():
                         # 3. Create Auto Alerts for High Value Opportunities
                         if clients_upsert_res.data:
                             thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-                            existing_alerts_res = fresh_admin.table("opportunity_alerts").select("client_id").eq("company_id", company_id).eq("alert_type", "battery_opportunity").gte("created_at", thirty_days_ago).execute()
+                            existing_alerts_res = admin_client.table("opportunity_alerts").select("client_id").eq("company_id", company_id).eq("alert_type", "battery_opportunity").gte("created_at", thirty_days_ago).execute()
                             existing_alert_client_ids = {row["client_id"] for row in (existing_alerts_res.data or [])}
                             
                             alerts_payload = []
@@ -1064,7 +1062,7 @@ def core_score_all_installations():
                                         "alert_message": f"High value battery opportunity detected for client {alias}.\nEstimated savings €{sav}.\nPayback {pay} years."
                                     })
                             if alerts_payload:
-                                fresh_admin.table("opportunity_alerts").insert(alerts_payload).execute()
+                                admin_client.table("opportunity_alerts").insert(alerts_payload).execute()
                         
                     total_installations_scored += len(upsert_payload)
                     logger.info(
@@ -1098,7 +1096,7 @@ def core_score_all_installations():
         )
         
         try:
-            fresh_admin.table("execution_tracking").insert({
+            admin_client.table("execution_tracking").insert({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "runtime_seconds": round(runtime_seconds, 2),
                 "installations_processed": total_installations_scored
