@@ -1026,6 +1026,38 @@ def core_score_all_installations():
 
                     if clients_payload:
                         # 2. Upsert Commercial Pipeline (BLOCK R2 pipeline logic)
+                        def normalize(value):
+                            if value is None:
+                                return None
+                            return str(value).strip().lower()
+
+                        print("RAW CLIENTS COUNT:", len(clients_payload))
+
+                        deduped = {}
+                        duplicates = []
+
+                        for c in clients_payload:
+                            company_id = normalize(c.get("company_id"))
+                            client_alias = normalize(c.get("client_alias"))
+
+                            if not company_id or not client_alias:
+                                continue
+
+                            key = (company_id, client_alias)
+
+                            if key in deduped:
+                                duplicates.append(key)
+
+                            # overwrite keeps last
+                            c["company_id"] = company_id
+                            c["client_alias"] = client_alias
+                            deduped[key] = c
+
+                        print("DUPLICATES AFTER NORMALIZATION:", duplicates)
+
+                        clients_payload = list(deduped.values())
+
+                        print("CLIENTS AFTER DEDUP:", len(clients_payload))
                         print("INSERTING CLIENTS:", len(clients_payload))
                         clients_upsert_res = admin_client.table("clients").upsert(
                             clients_payload,
