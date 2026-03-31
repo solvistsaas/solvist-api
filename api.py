@@ -1211,6 +1211,29 @@ def debug_installations_count(current_user: CurrentUser):
     }
 
 
+@app.get("/api/debug/full-dump")
+def debug_full_dump():
+    companies = admin_client.table("companies").select("*").execute().data or []
+    print("COMPANIES:", companies)
+
+    installations = admin_client.table("installations").select("*").execute().data or []
+    print("INSTALLATIONS:", installations)
+
+    clients = admin_client.table("clients").select("*").execute().data or []
+    print("CLIENTS:", clients)
+
+    return {
+        "companies": companies,
+        "installations": installations,
+        "clients": clients,
+        "counts": {
+            "companies": len(companies),
+            "installations": len(installations),
+            "clients": len(clients),
+        },
+    }
+
+
 def _request_id_for(request: Request) -> str:
     existing = getattr(request.state, "request_id", "")
     if existing:
