@@ -3206,6 +3206,19 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
         )
         total_opportunity_value = sum(float(row.get("expected_value") or 0) for row in (opportunity_value_res.data or []))
 
+        hot_leads_res = (
+            db.table("clients")
+            .select("id, portal_leads(id)")
+            .eq("company_id", tenant_id)
+            .gte("score", 40)
+            .execute()
+        )
+        hot_leads_count = sum(
+            1
+            for row in (hot_leads_res.data or [])
+            if isinstance(row.get("portal_leads"), list) and len(row.get("portal_leads")) > 0
+        )
+
         if res.data:
             data = res.data[0]
             return success_response({
@@ -3215,7 +3228,7 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
                 "total_opportunity_value": float(total_opportunity_value),
                 "weighted_forecast": float(data.get("weighted_forecast") or 0),
                 "closed_revenue": float(data.get("closed_revenue") or 0),
-                "hot_leads_count": data.get("hot_leads_count", 0),
+                "hot_leads_count": hot_leads_count,
                 "clients": [],
                 "pipeline": [],
             })
@@ -3901,7 +3914,6 @@ def send_client_portal(request: Request, client_id: str, tenant: Tenant):
         
     update_data = {
         "portal_enabled": True,
-        "portal_invited": True,
         "portal_token": token,
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
