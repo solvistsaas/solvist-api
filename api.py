@@ -3883,7 +3883,6 @@ def enable_client_portal(request: Request, client_id: str, tenant: Tenant):
     res = (
         db.table("clients")
         .update({
-            "portal_enabled": True,
             "portal_token": token,
             "updated_at": datetime.now(timezone.utc).isoformat()
         })
@@ -3913,7 +3912,6 @@ def send_client_portal(request: Request, client_id: str, tenant: Tenant):
         token = secrets.token_urlsafe(32)
         
     update_data = {
-        "portal_enabled": True,
         "portal_token": token,
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
@@ -3939,7 +3937,6 @@ def get_public_portal(request: Request, token: str):
         admin_client.table("clients")
         .select("id, company_id, client_alias, system_size_kwp, installation_year, location_type, opportunity_type, expected_value")
         .eq("portal_token", token)
-        .eq("portal_enabled", True)
         .single()
         .execute()
     )
@@ -3968,7 +3965,6 @@ def request_portal_proposal(request: Request, token: str):
         admin_client.table("clients")
         .select("id, company_id, opportunity_type")
         .eq("portal_token", token)
-        .eq("portal_enabled", True)
         .single()
         .execute()
     )
