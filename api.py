@@ -1198,18 +1198,25 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespan=lifespan)
 
 # CORS must be attached to the production app instance immediately after app init.
+allowed_origins = [
+    "https://solvist-frontend-2wag.vercel.app",
+    "http://localhost:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://solvist-frontend-2wag.vercel.app",
-        "http://localhost:3000",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.state.limiter = limiter
+
+
+@app.options("/{rest_of_path:path}")
+async def preflight_handler(rest_of_path: str):
+    return {"status": "ok"}
 
 
 @app.get("/api/debug/routes")
@@ -3341,44 +3348,63 @@ def get_client_timeline(request: Request, client_id: str, tenant: Tenant):
 @limiter.limit("30/minute")
 def pipeline(request: Request, current_user: OptionalCurrentUser):
     try:
+        grouped_data = {
+            "New": [],
+            "Contacted": [],
+            "Proposal": [],
+            "Closed": [],
+        }
+
         if not current_user:
             logger.info("pipeline: no authenticated user context")
-            return []
+            return {"data": grouped_data}
 
         if not current_user.company_id:
             logger.info("pipeline: user without company_id user_id=%s", current_user.id)
-            return []
+            return {"data": grouped_data}
 
         user_jwt = getattr(request.state, "user_jwt", "")
         if not user_jwt:
             logger.warning("pipeline: missing user_jwt user_id=%s", current_user.id)
-            return []
+            return {"data": grouped_data}
 
         db = scoped_client(user_jwt)
         logger.info("pipeline: fetching clients for company_id=%s", current_user.company_id)
         res = (
             db.table("clients")
-            .select("id, client_alias, opportunity_type, expected_value, close_probability, score, priority_score, status, notes, estimated_annual_export_kwh, estimated_battery_savings, battery_payback_years, battery_opportunity_score, sales_script_long, sales_script_short, opportunity_reason")
+            .select("*")
             .eq("company_id", current_user.company_id)
             .gte("score", 40)
             .order("priority_score", desc=True)
-            .limit(20)
             .execute()
         )
         data = res.data or []
+        print("PIPELINE RAW DATA:", data)
 
         for c in data:
             slug = c.get("opportunity_type")
             c["opportunity_type_display"] = opportunity_display_es(slug)
+            status_value = c.get("status") or "New"
+            if status_value not in grouped_data:
+                status_value = "New"
+            grouped_data[status_value].append(c)
 
-        return _json_safe(data)
+        print("PIPELINE GROUPED:", grouped_data)
+        return {"data": _json_safe(grouped_data)}
     except Exception:
         logger.exception(
             "pipeline failed user_id=%s company_id=%s",
             getattr(current_user, "id", None),
             getattr(current_user, "company_id", None),
         )
-        return []
+        return {
+            "data": {
+                "New": [],
+                "Contacted": [],
+                "Proposal": [],
+                "Closed": [],
+            }
+        }
 
 
 @app.get("/api/opportunities")
@@ -3404,109 +3430,152 @@ def opportunities(request: Request, tenant: AuthTenant, limit: int = 100):
 @app.get("/api/revenue-recovery")
 @limiter.limit("20/minute")
 def revenue_recovery(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = (
-        db.table("clients")
-        .select("id, client_alias, opportunity_type, expected_value, portal_invited, portal_leads(id)")
-        .eq("company_id", tenant.company_id)
-        .eq("portal_invited", True)
-        .eq("portal_enabled", True)
-        .execute()
-    )
-    
-    recovery_clients = [
-        client for client in (res.data or [])
-        if not client.get("portal_leads")
-    ]
-    
-    # Strip the relational data to keep the JSON payload minimal back to the client
-    for client in recovery_clients:
-        client.pop("portal_leads", None)
-        
-    return recovery_clients
+    try:
+        db = scoped_client(tenant.jwt)
+        try:
+            res = (
+                db.table("clients")
+                .select("id, client_alias, opportunity_type, expected_value, portal_invited, portal_leads(id)")
+                .eq("company_id", tenant.company_id)
+                .eq("portal_invited", True)
+                .eq("portal_enabled", True)
+                .execute()
+            )
+            rows = res.data or []
+            recovery_clients = [client for client in rows if not client.get("portal_leads")]
+            for client in recovery_clients:
+                client.pop("portal_leads", None)
+        except Exception:
+            # Fallback if relational join is unavailable
+            res = (
+                db.table("clients")
+                .select("id, client_alias, opportunity_type, expected_value, portal_invited")
+                .eq("company_id", tenant.company_id)
+                .eq("portal_invited", True)
+                .eq("portal_enabled", True)
+                .execute()
+            )
+            recovery_clients = res.data or []
+
+        if not recovery_clients:
+            return {"data": [], "message": "No data yet", "error": None}
+        return {"data": recovery_clients, "error": None}
+    except Exception as e:
+        print("ERROR IN revenue_recovery:", str(e))
+        return {"data": [], "error": None}
 
 
 @app.get("/api/opportunity-performance")
 @limiter.limit("20/minute")
 def opportunity_performance(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = (
-        db.table("clients")
-        .select("opportunity_type, portal_invited, portal_leads(id)")
-        .eq("company_id", tenant.company_id)
-        .execute()
-    )
-    
-    if not res.data:
-        return []
+    try:
+        db = scoped_client(tenant.jwt)
+        try:
+            res = (
+                db.table("clients")
+                .select("opportunity_type, portal_invited, portal_leads(id)")
+                .eq("company_id", tenant.company_id)
+                .execute()
+            )
+            rows = res.data or []
+            has_relational_leads = True
+        except Exception:
+            # Fallback if relational join is unavailable
+            res = (
+                db.table("clients")
+                .select("opportunity_type, portal_invited")
+                .eq("company_id", tenant.company_id)
+                .execute()
+            )
+            rows = res.data or []
+            has_relational_leads = False
 
-    # Map aggregations
-    performance_map = {}
-    
-    for c in res.data:
-        opp_type = c.get("opportunity_type")
-        if not opp_type:
-            continue
-            
-        if opp_type not in performance_map:
-            performance_map[opp_type] = {"detected_count": 0, "lead_count": 0}
-            
-        performance_map[opp_type]["detected_count"] += 1
-        
-        # Count explicit generated leads connected back from the unauthenticated portal
-        leads = c.get("portal_leads") or []
-        performance_map[opp_type]["lead_count"] += len(leads)
-        
-    # Final array mapping
-    result = []
-    for opp_type, data in performance_map.items():
-        detected = data["detected_count"]
-        leads = data["lead_count"]
-        rate = leads / detected if detected > 0 else 0.0
-        
-        result.append({
-            "opportunity_type": opp_type,
-            "detected_count": detected,
-            "lead_count": leads,
-            "conversion_rate": round(rate, 2)
-        })
-        
-    return sorted(result, key=lambda x: x["lead_count"], reverse=True)
+        if not rows:
+            return {"data": [], "message": "No data yet", "error": None}
+
+        performance_map = {}
+        for c in rows:
+            opp_type = c.get("opportunity_type")
+            if not opp_type:
+                continue
+            if opp_type not in performance_map:
+                performance_map[opp_type] = {"detected_count": 0, "lead_count": 0}
+            performance_map[opp_type]["detected_count"] += 1
+            leads = c.get("portal_leads") or [] if has_relational_leads else []
+            performance_map[opp_type]["lead_count"] += len(leads)
+
+        result = []
+        for opp_type, data in performance_map.items():
+            detected = data["detected_count"]
+            leads = data["lead_count"]
+            rate = leads / detected if detected > 0 else 0.0
+            result.append({
+                "opportunity_type": opp_type,
+                "detected_count": detected,
+                "lead_count": leads,
+                "conversion_rate": round(rate, 2)
+            })
+
+        if not result:
+            return {"data": [], "message": "No data yet", "error": None}
+        return {"data": sorted(result, key=lambda x: x["lead_count"], reverse=True), "error": None}
+    except Exception as e:
+        print("ERROR IN opportunity_performance:", str(e))
+        return {"data": [], "error": None}
 
 
 @app.get("/api/portal-leads")
 @limiter.limit("20/minute")
 def get_portal_leads(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    
-    # We must join `portal_leads` matching over RLS to fetch recent notifications safely
-    # Supabase allows native foreign-key selection syntax natively joining over the `client_id` parameter map.
-    res = (
-        db.table("portal_leads")
-        .select("id, interest_type, requested_at, status, clients!inner(client_alias, company_id)")
-        .eq("clients.company_id", tenant.company_id)
-        .order("requested_at", desc=True)
-        .limit(10)
-        .execute()
-    )
-    
-    if not res.data:
-        return []
-        
-    leads = []
-    for lead in res.data:
-        client_data = lead.get("clients", {})
-        status_raw = lead.get("status")
-        leads.append({
-            "id": lead.get("id"),
-            "client_alias": client_data.get("client_alias", "Cliente"),
-            "interest_type": lead.get("interest_type"),
-            "requested_at": lead.get("requested_at"),
-            "status": status_raw,
-            "status_display": "Nuevo lead desde portal" if status_raw == "New" else status_raw
-        })
-        
-    return leads
+    try:
+        db = scoped_client(tenant.jwt)
+        try:
+            res = (
+                db.table("portal_leads")
+                .select("id, interest_type, requested_at, status, clients!inner(client_alias, company_id)")
+                .eq("clients.company_id", tenant.company_id)
+                .order("requested_at", desc=True)
+                .limit(10)
+                .execute()
+            )
+            rows = res.data or []
+            leads = []
+            for lead in rows:
+                client_data = lead.get("clients", {}) or {}
+                status_raw = lead.get("status")
+                leads.append({
+                    "id": lead.get("id"),
+                    "client_alias": client_data.get("client_alias", "Cliente"),
+                    "interest_type": lead.get("interest_type"),
+                    "requested_at": lead.get("requested_at"),
+                    "status": status_raw,
+                    "status_display": "Nuevo lead desde portal" if status_raw == "New" else status_raw
+                })
+        except Exception:
+            # Fallback without join if relational syntax fails
+            res = (
+                db.table("portal_leads")
+                .select("id, interest_type, requested_at, status")
+                .order("requested_at", desc=True)
+                .limit(10)
+                .execute()
+            )
+            rows = res.data or []
+            leads = [{
+                "id": lead.get("id"),
+                "client_alias": "Cliente",
+                "interest_type": lead.get("interest_type"),
+                "requested_at": lead.get("requested_at"),
+                "status": lead.get("status"),
+                "status_display": "Nuevo lead desde portal" if lead.get("status") == "New" else lead.get("status"),
+            } for lead in rows]
+
+        if not leads:
+            return {"data": [], "message": "No data yet", "error": None}
+        return {"data": leads, "error": None}
+    except Exception as e:
+        print("ERROR IN get_portal_leads:", str(e))
+        return {"data": [], "error": None}
 
 
 @app.get("/api/client/{client_id}/portal-analytics")
