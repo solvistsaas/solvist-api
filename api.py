@@ -692,6 +692,20 @@ def _json_safe(value):
     return value
 
 
+def success_response(data):
+    return {
+        "data": data,
+        "error": None,
+    }
+
+
+def error_response(message):
+    return {
+        "data": None,
+        "error": message,
+    }
+
+
 def build_sales_email_draft(client: Dict) -> Dict[str, str]:
     alias = client.get("client_alias") or "Cliente"
     opportunity_slug = client.get("opportunity_type")
@@ -1216,39 +1230,50 @@ app.state.limiter = limiter
 
 @app.options("/{rest_of_path:path}")
 async def preflight_handler(rest_of_path: str):
-    return {"status": "ok"}
+    return success_response({"status": "ok"})
 
 
 @app.get("/api/debug/routes")
 def debug_routes():
-    return [route.path for route in app.routes]
+    try:
+        return success_response([route.path for route in app.routes])
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.get("/api/debug/auth-check")
 def debug_auth(current_user: CurrentUser):
-    return {
-        "user_id": current_user.id,
-        "tenant_id": current_user.company_id,
-        "email": current_user.email,
-    }
+    try:
+        return success_response({
+            "user_id": current_user.id,
+            "tenant_id": current_user.company_id,
+            "email": current_user.email,
+        })
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.get("/api/debug/installations-count")
 def debug_installations_count(current_user: CurrentUser):
-    company_id = current_user.company_id
-    if not company_id:
-        raise HTTPException(status_code=403, detail="User has no tenant assigned")
-    res = (
-        admin_client.table("installations")
-        .select("*")
-        .eq("company_id", company_id)
-        .execute()
-    )
-    return {
-        "count": len(res.data or []),
-        "company_id": company_id,
-        "data": (res.data or [])[:5],
-    }
+    try:
+        company_id = current_user.company_id
+        if not company_id:
+            raise HTTPException(status_code=403, detail="User has no tenant assigned")
+        res = (
+            admin_client.table("installations")
+            .select("*")
+            .eq("company_id", company_id)
+            .execute()
+        )
+        return success_response({
+            "count": len(res.data or []),
+            "company_id": company_id,
+            "installations": (res.data or [])[:5],
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.get("/api/debug/full-dump")
@@ -1277,7 +1302,7 @@ def debug_full_dump():
         print("ERROR CLIENTS:", str(e))
         clients_data = []
 
-    return {
+    return success_response({
         "companies": companies_data,
         "installations": installations_data,
         "clients": clients_data,
@@ -1286,37 +1311,40 @@ def debug_full_dump():
             "installations": len(installations_data),
             "clients": len(clients_data),
         },
-    }
+    })
 
 
 @app.get("/api/debug/test-company-loop")
 def test_company_loop():
-    companies = admin_client.table("companies").select("*").execute().data or []
+    try:
+        companies = admin_client.table("companies").select("*").execute().data or []
 
-    result = []
+        result = []
 
-    for company in companies:
-        try:
-            raw_company_id = company.get("id") or company.get("company_id")
-            company_id = str(raw_company_id).strip() if raw_company_id else None
+        for company in companies:
+            try:
+                raw_company_id = company.get("id") or company.get("company_id")
+                company_id = str(raw_company_id).strip() if raw_company_id else None
 
-            installations = admin_client.table("installations").select("*").execute().data or []
+                installations = admin_client.table("installations").select("*").execute().data or []
 
-            result.append({
-                "company": company,
-                "company_id": company_id,
-                "installations_count": len(installations),
-                "status": "OK"
-            })
+                result.append({
+                    "company": company,
+                    "company_id": company_id,
+                    "installations_count": len(installations),
+                    "status": "OK"
+                })
 
-        except Exception as e:
-            result.append({
-                "company": company,
-                "error": str(e),
-                "status": "ERROR"
-            })
+            except Exception as e:
+                result.append({
+                    "company": company,
+                    "error": str(e),
+                    "status": "ERROR"
+                })
 
-    return result
+        return success_response(result)
+    except Exception as e:
+        return error_response(str(e))
 
 
 def _request_id_for(request: Request) -> str:
@@ -1380,91 +1408,97 @@ def score_all_installations(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return {
+    return success_response({
         "message": "Scoring executed",
         "result": result,
-    }
+    })
 
 @app.get("/api/portfolio-opportunity-value")
 @limiter.limit("20/minute")
 def get_portfolio_opportunity_value(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    
-    # 1. Fetch all clients for the company
-    res = (
-        db.table("clients")
-        .select("opportunity_type, expected_value")
-        .eq("company_id", tenant.company_id)
-        .execute()
-    )
-    
-    if not res.data:
-        return {
-            "battery_upgrades_value": 0,
-            "inverter_replacements_value": 0,
-            "system_expansions_value": 0,
-            "total_opportunity_value": 0,
-            "systems_analyzed": 0
-        }
-    
-    # 2. Map and aggregate
-    battery_val = 0
-    inverter_val = 0
-    expansion_val = 0
-    total_val = 0
-    
-    for client in res.data:
-        val = float(client.get("expected_value") or 0)
-        opp_type = client.get("opportunity_type")
-        
-        if opp_type == OPP_BATTERY_UPGRADE:
-            battery_val += val
-        elif opp_type == OPP_INVERTER_REPLACEMENT:
-            inverter_val += val
-        elif opp_type == OPP_SYSTEM_EXPANSION:
-            expansion_val += val
-            
-        total_val += val
-        
-    return {
-        "battery_upgrades_value": battery_val,
-        "inverter_replacements_value": inverter_val,
-        "system_expansions_value": expansion_val,
-        "total_opportunity_value": total_val,
-        "systems_analyzed": len(res.data)
-    }
+    try:
+        db = scoped_client(tenant.jwt)
+
+        # 1. Fetch all clients for the company
+        res = (
+            db.table("clients")
+            .select("opportunity_type, expected_value")
+            .eq("company_id", tenant.company_id)
+            .execute()
+        )
+
+        if not res.data:
+            return success_response({
+                "battery_upgrades_value": 0,
+                "inverter_replacements_value": 0,
+                "system_expansions_value": 0,
+                "total_opportunity_value": 0,
+                "systems_analyzed": 0
+            })
+
+        # 2. Map and aggregate
+        battery_val = 0
+        inverter_val = 0
+        expansion_val = 0
+        total_val = 0
+
+        for client in res.data:
+            val = float(client.get("expected_value") or 0)
+            opp_type = client.get("opportunity_type")
+
+            if opp_type == OPP_BATTERY_UPGRADE:
+                battery_val += val
+            elif opp_type == OPP_INVERTER_REPLACEMENT:
+                inverter_val += val
+            elif opp_type == OPP_SYSTEM_EXPANSION:
+                expansion_val += val
+
+            total_val += val
+
+        return success_response({
+            "battery_upgrades_value": battery_val,
+            "inverter_replacements_value": inverter_val,
+            "system_expansions_value": expansion_val,
+            "total_opportunity_value": total_val,
+            "systems_analyzed": len(res.data)
+        })
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.get("/api/recontact-opportunities")
 @limiter.limit("20/minute")
 def get_recontact_opportunities(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    current_year = datetime.now().year
-    recontact_limit = current_year - 3
-    
-    # Rules: installation_year <= current_year - 3 AND score > 60
-    res = (
-        db.table("clients")
-        .select("id, expected_value")
-        .eq("company_id", tenant.company_id)
-        .lte("installation_year", recontact_limit)
-        .gt("score", 60)
-        .execute()
-    )
-    
-    if not res.data:
-        return {
-            "clients_to_recontact": 0,
-            "estimated_revenue": 0
-        }
-        
-    count = len(res.data)
-    total_rev = sum(float(c.get("expected_value") or 0) for c in res.data)
-    
-    return {
-        "clients_to_recontact": count,
-        "estimated_revenue": total_rev
-    }
+    try:
+        db = scoped_client(tenant.jwt)
+        current_year = datetime.now().year
+        recontact_limit = current_year - 3
+
+        # Rules: installation_year <= current_year - 3 AND score > 60
+        res = (
+            db.table("clients")
+            .select("id, expected_value")
+            .eq("company_id", tenant.company_id)
+            .lte("installation_year", recontact_limit)
+            .gt("score", 60)
+            .execute()
+        )
+
+        if not res.data:
+            return success_response({
+                "clients_to_recontact": 0,
+                "estimated_revenue": 0
+            })
+
+        count = len(res.data)
+        total_rev = sum(float(c.get("expected_value") or 0) for c in res.data)
+
+        return success_response({
+            "clients_to_recontact": count,
+            "estimated_revenue": total_rev
+        })
+    except Exception as e:
+        return error_response(str(e))
 
 @app.middleware("http")
 async def audit_middleware(request: Request, call_next):
@@ -1551,18 +1585,18 @@ def create_checkout_session(request: Request, tenant: Tenant):
     """
     if not STRIPE_SECRET_KEY or STRIPE_SECRET_KEY == "sk_test_placeholder":
         logger.warning("Stripe secret key not configured or using placeholder.")
-        return {"error": "Stripe configuration missing"}
+        return error_response("Stripe configuration missing")
 
     try:
         # In a real scenario, you'd create a session here.
         # This is a placeholder as requested.
-        return {
+        return success_response({
             "status": "success",
             "checkout_url": "https://checkout.stripe.com/pay/placeholder_session_id"
-        }
+        })
     except Exception as e:
         logger.error(f"Stripe session error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error creating checkout session")
+        return error_response("Error creating checkout session")
 
 
 # ─── Endpoints: Data Ingestion (Plan Enforcement) ──────────────────────────────
@@ -2276,7 +2310,7 @@ def create_installation(
     data["location_type"] = payload.location_type.value
     data["company_id"] = tenant.company_id
     res = db.table("installations").insert(data).execute()
-    return res.data[0]
+    return success_response(res.data[0] if res.data else None)
 
 
 # ─── Endpoints: Import Installations V1 ──────────────────────────────────────────
@@ -2430,13 +2464,13 @@ async def import_installations(
             "tenant_id": company_id,
         })
 
-        return {
+        return success_response({
             "success": True,
             "rows_processed": row_count if row_count else len(insert_payload),
             "tenant_id": company_id,
             "installations_imported": len(insert_payload),
             "scoring_triggered": scoring_triggered
-        }
+        })
     except Exception as e:
         import traceback
         print("IMPORT ERROR:", str(e))
@@ -2445,8 +2479,8 @@ async def import_installations(
         return JSONResponse(
             status_code=500,
             content={
-                "error": "Import failed",
-                "details": str(e)
+                "data": None,
+                "error": str(e)
             }
         )
 
@@ -2622,7 +2656,7 @@ async def public_portfolio_scan(
         except Exception as tracking_error:
             logger.warning(f"Public portfolio scan tracking failed: {tracking_error}")
 
-        return {
+        return success_response({
             "systems_analyzed": systems_analyzed,
             "opportunities_detected": opportunities_detected,
             "opportunity_rate": opportunity_rate,
@@ -2631,7 +2665,7 @@ async def public_portfolio_scan(
             "weekly_priority_clients": weekly_priority_clients,
             "weekly_priority_value": round(weekly_priority_value, 2),
             "currency": detected_currency,
-        }
+        })
     except HTTPException:
         raise
     except Exception as e:
@@ -2647,178 +2681,188 @@ async def public_portfolio_scan(
 @limiter.limit("30/minute")
 def public_platform_stats(request: Request):
     try:
-        return _read_platform_scan_totals()
+        return success_response(_read_platform_scan_totals())
     except Exception as e:
         logger.warning(f"Public platform stats failed: {e}")
-        return {
+        return success_response({
             "total_portfolios_analyzed": 0,
             "total_revenue_detected": 0.0,
-        }
+        })
 
 # ─── Endpoints: Commercial Dashboard V1 ────────────────────────────────────────
 @app.get("/api/dashboard")
 @limiter.limit("30/minute")
 def dashboard(request: Request, tenant: AuthTenant):
-    db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
-
-    # BLOCK 2: Fetch Active Threshold Parameter
-    # Service role needed to read company_parameters as it has no RLS (engine/admin use)
-    # or fallback to 65
     try:
-        param_res = db.table("company_parameters").select("active_threshold").eq("company_id", tenant.company_id).execute()
-        active_threshold = param_res.data[0].get("active_threshold") if param_res.data else 65
-    except Exception:
-        active_threshold = 65
+        db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
 
-    if active_threshold is None:
-        active_threshold = 65
+        # BLOCK 2: Fetch Active Threshold Parameter
+        # Service role needed to read company_parameters as it has no RLS (engine/admin use)
+        # or fallback to 65
+        try:
+            param_res = db.table("company_parameters").select("active_threshold").eq("company_id", tenant.company_id).execute()
+            active_threshold = param_res.data[0].get("active_threshold") if param_res.data else 65
+        except Exception:
+            active_threshold = 65
 
-    current_month = date.today().replace(day=1).isoformat()
+        if active_threshold is None:
+            active_threshold = 65
 
-    # 1. Total installations (Postgres Count) - Unfiltered by month as it represents physical assets
-    inst_count_res = db.table("installations").select("id", count="exact").eq("company_id", tenant.company_id).execute()
-    total_inst = inst_count_res.count if hasattr(inst_count_res, "count") and inst_count_res.count is not None else len(inst_count_res.data)
+        current_month = date.today().replace(day=1).isoformat()
 
-    # 2. Total Scored Count (Isolated to current_month)
-    total_scored_res = db.table("opportunity_scores").select("id", count="exact").eq("company_id", tenant.company_id).eq("calculated_month", current_month).execute()
-    total_scored = total_scored_res.count if hasattr(total_scored_res, "count") and total_scored_res.count is not None else len(total_scored_res.data)
+        # 1. Total installations (Postgres Count) - Unfiltered by month as it represents physical assets
+        inst_count_res = db.table("installations").select("id", count="exact").eq("company_id", tenant.company_id).execute()
+        total_inst = inst_count_res.count if hasattr(inst_count_res, "count") and inst_count_res.count is not None else len(inst_count_res.data)
 
-    # 3. Active Window Count (Isolated to current_month)
-    active_res = (
-        db.table("opportunity_scores")
-        .select("id", count="exact")
-        .eq("company_id", tenant.company_id)
-        .eq("calculated_month", current_month)
-        .gt("total_score", active_threshold)
-        .execute()
-    )
-    active_window = active_res.count if hasattr(active_res, "count") and active_res.count is not None else len(active_res.data)
+        # 2. Total Scored Count (Isolated to current_month)
+        total_scored_res = db.table("opportunity_scores").select("id", count="exact").eq("company_id", tenant.company_id).eq("calculated_month", current_month).execute()
+        total_scored = total_scored_res.count if hasattr(total_scored_res, "count") and total_scored_res.count is not None else len(total_scored_res.data)
 
-    window_pct = round((active_window / total_scored * 100), 1) if total_scored > 0 else 0
+        # 3. Active Window Count (Isolated to current_month)
+        active_res = (
+            db.table("opportunity_scores")
+            .select("id", count="exact")
+            .eq("company_id", tenant.company_id)
+            .eq("calculated_month", current_month)
+            .gt("total_score", active_threshold)
+            .execute()
+        )
+        active_window = active_res.count if hasattr(active_res, "count") and active_res.count is not None else len(active_res.data)
 
-    # 4. Estimated potential value (Filtered query join on kwp, isolated to current_month)
-    active_kwp_res = (
-        db.table("opportunity_scores")
-        .select("installations!inner(kwp)")
-        .eq("company_id", tenant.company_id)
-        .eq("calculated_month", current_month)
-        .gt("total_score", active_threshold)
-        .execute()
-    )
-    active_kwp = 0
-    for row in active_kwp_res.data:
-        inst = row.get("installations", {})
-        if inst and isinstance(inst, dict):
-            active_kwp += inst.get("kwp") or 0
-    pot_value = round(active_kwp * 1500, 2)  # Proxy calculation
+        window_pct = round((active_window / total_scored * 100), 1) if total_scored > 0 else 0
 
-    # Top 5 clients (Isolated to current month)
-    # Using Supabase joined query (installations is a FK in opportunity_scores)
-    top_res = (
-        db.table("opportunity_scores")
-        .select("installation_id, total_score, primary_reason, recommended_action")
-        .eq("company_id", tenant.company_id)
-        .eq("calculated_month", current_month)
-        .order("total_score", desc=True)
-        .limit(5)
-        .execute()
-    )
-    
-    formatted_top = []
-    for row in top_res.data:
-        client_name = f"PV-{str(row.get('installation_id', ''))[:8].upper()}" if row.get("installation_id") else "Cliente"
-        formatted_top.append({
-            "client_name": client_name,
-            "total_score": row["total_score"],
-            "primary_reason": row["primary_reason"],
-            "recommended_action": row["recommended_action"]
+        # 4. Estimated potential value (Filtered query join on kwp, isolated to current_month)
+        active_kwp_res = (
+            db.table("opportunity_scores")
+            .select("installations!inner(kwp)")
+            .eq("company_id", tenant.company_id)
+            .eq("calculated_month", current_month)
+            .gt("total_score", active_threshold)
+            .execute()
+        )
+        active_kwp = 0
+        for row in (active_kwp_res.data or []):
+            inst = row.get("installations", {})
+            if inst and isinstance(inst, dict):
+                active_kwp += inst.get("kwp") or 0
+        pot_value = round(active_kwp * 1500, 2)  # Proxy calculation
+
+        # Top 5 clients (Isolated to current month)
+        # Using Supabase joined query (installations is a FK in opportunity_scores)
+        top_res = (
+            db.table("opportunity_scores")
+            .select("installation_id, total_score, primary_reason, recommended_action")
+            .eq("company_id", tenant.company_id)
+            .eq("calculated_month", current_month)
+            .order("total_score", desc=True)
+            .limit(5)
+            .execute()
+        )
+
+        formatted_top = []
+        for row in (top_res.data or []):
+            client_name = f"PV-{str(row.get('installation_id', ''))[:8].upper()}" if row.get("installation_id") else "Cliente"
+            formatted_top.append({
+                "client_name": client_name,
+                "total_score": row["total_score"],
+                "primary_reason": row["primary_reason"],
+                "recommended_action": row["recommended_action"]
+            })
+
+        # Real Monthly Trend via Postgres RPC
+        try:
+            trend_res = db.rpc("get_monthly_avg_scores", {"p_company_id": tenant.company_id}).execute()
+            monthly_trend = [float(row["avg_score"]) for row in (trend_res.data or [])]
+        except Exception as e:
+            logger.error(f"Failed to fetch trend: {str(e)}")
+            monthly_trend = []
+
+        return success_response({
+            "total_installations": total_inst,
+            "window_active_pct": window_pct,
+            "estimated_potential_value": pot_value,
+            "monthly_avg_score_trend": monthly_trend,
+            "top_5_clients": formatted_top
         })
-
-    # Real Monthly Trend via Postgres RPC
-    try:
-        trend_res = db.rpc("get_monthly_avg_scores", {"p_company_id": tenant.company_id}).execute()
-        monthly_trend = [float(row["avg_score"]) for row in trend_res.data] if trend_res.data else []
     except Exception as e:
-        logger.error(f"Failed to fetch trend: {str(e)}")
-        monthly_trend = []
-
-    return {
-        "total_installations": total_inst,
-        "window_active_pct": window_pct,
-        "estimated_potential_value": pot_value,
-        "monthly_avg_score_trend": monthly_trend,
-        "top_5_clients": formatted_top
-    }
+        return error_response(str(e))
 
 
 # ─── Endpoints: Activation List V1 ─────────────────────────────────────────────
 @app.get("/api/activation")
 @limiter.limit("30/minute")
 def activation_list(request: Request, tenant: Tenant, limit: int = 20, offset: int = 0):
-    db = scoped_client(tenant.jwt)
-    current_month = date.today().replace(day=1).isoformat()
-    res = (
-        db.table("opportunity_scores")
-        .select("id, installation_id, total_score, primary_reason, recommended_action, installations(location_type, installation_year)")
-        .eq("company_id", tenant.company_id)
-        .eq("calculated_month", current_month)
-        .order("total_score", desc=True)
-        .limit(limit)
-        .offset(offset)
-        .execute()
-    )
-    
-    # Flatten the result mapping
-    output = []
-    
-    # BLOCK F20: Fetch battery metrics from clients table
-    client_aliases = [f"PV-{str(row['installation_id'])[:8].upper()}" for row in res.data if row.get('installation_id')]
-    metrics_by_alias = {}
-    if client_aliases:
-        clients_res = db.table("clients").select("client_alias, estimated_annual_export_kwh, estimated_battery_savings, battery_payback_years, battery_opportunity_score").in_("client_alias", client_aliases).eq("company_id", tenant.company_id).execute()
-        metrics_by_alias = {c["client_alias"]: c for c in clients_res.data}
+    try:
+        db = scoped_client(tenant.jwt)
+        current_month = date.today().replace(day=1).isoformat()
+        res = (
+            db.table("opportunity_scores")
+            .select("id, installation_id, total_score, primary_reason, recommended_action, installations(location_type, installation_year)")
+            .eq("company_id", tenant.company_id)
+            .eq("calculated_month", current_month)
+            .order("total_score", desc=True)
+            .limit(limit)
+            .offset(offset)
+            .execute()
+        )
 
-    for row in res.data:
-        inst = row.get("installations", {}) or {}
-        alias = f"PV-{str(row['installation_id'])[:8].upper()}" if row.get("installation_id") else ""
-        metrics = metrics_by_alias.get(alias, {})
-        
-        output.append({
-            "score_id": row.get("id"),
-            "installation_id": row.get("installation_id"),
-            "client_name": alias or "Cliente",
-            "location_type": inst.get("location_type"),
-            "installation_year": inst.get("installation_year"),
-            "total_score": row.get("total_score"),
-            "primary_reason": row.get("primary_reason"),
-            "recommended_action": row.get("recommended_action"),
-            "estimated_annual_export_kwh": metrics.get("estimated_annual_export_kwh"),
-            "estimated_battery_savings": metrics.get("estimated_battery_savings"),
-            "battery_payback_years": metrics.get("battery_payback_years"),
-            "battery_opportunity_score": metrics.get("battery_opportunity_score")
-        })
-    return output
+        # Flatten the result mapping
+        output = []
+
+        # BLOCK F20: Fetch battery metrics from clients table
+        client_aliases = [f"PV-{str(row['installation_id'])[:8].upper()}" for row in (res.data or []) if row.get('installation_id')]
+        metrics_by_alias = {}
+        if client_aliases:
+            clients_res = db.table("clients").select("client_alias, estimated_annual_export_kwh, estimated_battery_savings, battery_payback_years, battery_opportunity_score").in_("client_alias", client_aliases).eq("company_id", tenant.company_id).execute()
+            metrics_by_alias = {c["client_alias"]: c for c in (clients_res.data or [])}
+
+        for row in (res.data or []):
+            inst = row.get("installations", {}) or {}
+            alias = f"PV-{str(row['installation_id'])[:8].upper()}" if row.get("installation_id") else ""
+            metrics = metrics_by_alias.get(alias, {})
+
+            output.append({
+                "score_id": row.get("id"),
+                "installation_id": row.get("installation_id"),
+                "client_name": alias or "Cliente",
+                "location_type": inst.get("location_type"),
+                "installation_year": inst.get("installation_year"),
+                "total_score": row.get("total_score"),
+                "primary_reason": row.get("primary_reason"),
+                "recommended_action": row.get("recommended_action"),
+                "estimated_annual_export_kwh": metrics.get("estimated_annual_export_kwh"),
+                "estimated_battery_savings": metrics.get("estimated_battery_savings"),
+                "battery_payback_years": metrics.get("battery_payback_years"),
+                "battery_opportunity_score": metrics.get("battery_opportunity_score")
+            })
+        return success_response(output)
+    except Exception as e:
+        return error_response(str(e))
 
 
 # ─── Endpoints: Insights Panel V1 ──────────────────────────────────────────────
 @app.get("/api/insights")
 @limiter.limit("30/minute")
 def insights(request: Request, tenant: AuthTenant):
-    db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
-    current_month = date.today().replace(day=1).isoformat()
-    res = db.table("opportunity_scores").select("battery_score, maintenance_score, ev_score").eq("company_id", tenant.company_id).eq("calculated_month", current_month).execute()
-    
-    total = len(res.data)
-    batt_opps = sum(1 for r in res.data if r.get("battery_score", 0) >= 15)
-    maint_opps = sum(1 for r in res.data if r.get("maintenance_score", 0) >= 15)
-    
-    perc_batt = round((batt_opps / total * 100)) if total > 0 else 0
-    perc_maint = round((maint_opps / total * 100)) if total > 0 else 0
-    
-    return [
-        {"metric": "Oportunidades Batería", "value": f"{perc_batt}%", "description": "en ventana óptima (>15 pts)"},
-        {"metric": "Riesgo Mantenimiento", "value": f"{perc_maint}%", "description": "instalaciones desprotegidas"},
-    ]
+    try:
+        db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
+        current_month = date.today().replace(day=1).isoformat()
+        res = db.table("opportunity_scores").select("battery_score, maintenance_score, ev_score").eq("company_id", tenant.company_id).eq("calculated_month", current_month).execute()
+
+        rows = res.data or []
+        total = len(rows)
+        batt_opps = sum(1 for r in rows if r.get("battery_score", 0) >= 15)
+        maint_opps = sum(1 for r in rows if r.get("maintenance_score", 0) >= 15)
+
+        perc_batt = round((batt_opps / total * 100)) if total > 0 else 0
+        perc_maint = round((maint_opps / total * 100)) if total > 0 else 0
+
+        return success_response([
+            {"metric": "Oportunidades Batería", "value": f"{perc_batt}%", "description": "en ventana óptima (>15 pts)"},
+            {"metric": "Riesgo Mantenimiento", "value": f"{perc_maint}%", "description": "instalaciones desprotegidas"},
+        ])
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.post("/api/tracking")
@@ -2839,7 +2883,7 @@ def add_tracking(request: Request, payload: TrackingUpdate, tenant: Tenant):
         data["closed_at"] = datetime.now(timezone.utc).isoformat()
         
     res = db.table("execution_tracking").insert(data).execute()
-    return {"message": "Tracking saved", "id": res.data[0]["id"]}
+    return success_response({"message": "Tracking saved", "id": res.data[0]["id"]})
 
 
 # ─── Endpoints: Minimalist PDF Generation V1 ───────────────────────────────────
@@ -3042,66 +3086,77 @@ def generate_proposal_pdf_alias(request: Request, client_id: str, tenant: Tenant
 @app.get("/api/alerts")
 @limiter.limit("60/minute")
 def get_opportunity_alerts(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = (
-        db.table("opportunity_alerts")
-        .select("*")
-        .eq("company_id", tenant.company_id)
-        .eq("seen", False)
-        .order("created_at", desc=True)
-        .execute()
-    )
-    return res.data or []
+    try:
+        db = scoped_client(tenant.jwt)
+        res = (
+            db.table("opportunity_alerts")
+            .select("*")
+            .eq("company_id", tenant.company_id)
+            .eq("seen", False)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return success_response(res.data or [])
+    except Exception as e:
+        return error_response(str(e))
 
 @app.post("/api/alerts/{alert_id}/seen")
 @limiter.limit("60/minute")
 def mark_alert_seen(alert_id: str, request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = (
-        db.table("opportunity_alerts")
-        .update({"seen": True})
-        .eq("id", alert_id)
-        .eq("company_id", tenant.company_id)
-        .execute()
-    )
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    return {"success": True, "alert": res.data[0]}
+    try:
+        db = scoped_client(tenant.jwt)
+        res = (
+            db.table("opportunity_alerts")
+            .update({"seen": True})
+            .eq("id", alert_id)
+            .eq("company_id", tenant.company_id)
+            .execute()
+        )
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        return success_response({"success": True, "alert": res.data[0]})
+    except HTTPException:
+        raise
+    except Exception as e:
+        return error_response(str(e))
 
 @app.get("/api/opportunity-insights")
 @limiter.limit("30/minute")
 def opportunity_insights(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = (
-        db.table("clients")
-        .select("opportunity_type, expected_value, status")
-        .eq("company_id", tenant.company_id)
-        .neq("status", "Lost")
-        .execute()
-    )
-    
-    type_values = {}
-    total_opps = 0
-    
-    for row in res.data:
-        val = float(row.get("expected_value") or 0)
-        slug = row.get("opportunity_type") or "unknown"
-        type_values[slug] = type_values.get(slug, 0.0) + val
-        total_opps += 1
-        
-    opportunities_list = [
-        {
-            "slug": k, 
-            "type": OPP_DISPLAY_NAMES.get(k, k.replace("_", " ").title()), 
-            "value": v
-        } for k, v in type_values.items()
-    ]
-    opportunities_list.sort(key=lambda x: x["value"], reverse=True)
-    
-    return {
-        "opportunities": opportunities_list,
-        "total_opportunities": total_opps
-    }
+    try:
+        db = scoped_client(tenant.jwt)
+        res = (
+            db.table("clients")
+            .select("opportunity_type, expected_value, status")
+            .eq("company_id", tenant.company_id)
+            .neq("status", "Lost")
+            .execute()
+        )
+
+        type_values = {}
+        total_opps = 0
+
+        for row in (res.data or []):
+            val = float(row.get("expected_value") or 0)
+            slug = row.get("opportunity_type") or "unknown"
+            type_values[slug] = type_values.get(slug, 0.0) + val
+            total_opps += 1
+
+        opportunities_list = [
+            {
+                "slug": k,
+                "type": OPP_DISPLAY_NAMES.get(k, k.replace("_", " ").title()),
+                "value": v
+            } for k, v in type_values.items()
+        ]
+        opportunities_list.sort(key=lambda x: x["value"], reverse=True)
+
+        return success_response({
+            "opportunities": opportunities_list,
+            "total_opportunities": total_opps
+        })
+    except Exception as e:
+        return error_response(str(e))
 
 @app.get("/api/commercial-dashboard")
 @limiter.limit("30/minute")
@@ -3121,18 +3176,18 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
 
         if not current_user:
             logger.info("commercial_dashboard: no authenticated user context")
-            return empty_dashboard
+            return success_response(empty_dashboard)
 
         tenant_id = current_user.company_id
 
         if not tenant_id:
             logger.info("commercial_dashboard: user without company_id user_id=%s", current_user.id)
-            return empty_dashboard
+            return success_response(empty_dashboard)
 
         user_jwt = getattr(request.state, "user_jwt", "")
         if not user_jwt:
             logger.warning("commercial_dashboard: missing user_jwt user_id=%s", current_user.id)
-            return empty_dashboard
+            return success_response(empty_dashboard)
 
         db = scoped_client(user_jwt)
         if not db:
@@ -3153,7 +3208,7 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
 
         if res.data:
             data = res.data[0]
-            return {
+            return success_response({
                 "currency": data.get("currency", "EUR"),
                 "total_systems": data.get("total_systems", 0),
                 "total_pipeline_value": float(total_opportunity_value),
@@ -3163,52 +3218,46 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
                 "hot_leads_count": data.get("hot_leads_count", 0),
                 "clients": [],
                 "pipeline": [],
-            }
+            })
 
-        return empty_dashboard
-    except Exception:
+        return success_response(empty_dashboard)
+    except Exception as e:
         logger.exception(
             "commercial_dashboard failed user_id=%s company_id=%s",
             getattr(current_user, "id", None),
             getattr(current_user, "company_id", None),
         )
-        return {
-            "currency": "EUR",
-            "total_systems": 0,
-            "total_pipeline_value": 0.0,
-            "total_opportunity_value": 0.0,
-            "weighted_forecast": 0.0,
-            "closed_revenue": 0.0,
-            "hot_leads_count": 0,
-            "clients": [],
-            "pipeline": [],
-        }
+        return error_response(str(e))
 
 
 @app.get("/api/top-priority")
 @limiter.limit("30/minute")
 def top_priority(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = (
-        db.table("clients")
-        .select("id, client_alias, opportunity_type, expected_value, close_probability, score, priority_score, status, battery_opportunity_score")
-        .eq("company_id", tenant.company_id)
-        .neq("status", "Closed")
-        .execute()
-    )
-    # Sort by priority_score descending
-    data = sorted(
-        res.data,
-        key=lambda c: (c.get("priority_score", 0) or 0),
-        reverse=True
-    )
-    
-    # Enrichment with display names
-    for c in data:
-        slug = c.get("opportunity_type")
-        c["opportunity_type_display"] = opportunity_display_es(slug)
-        
-    return data[:5]
+    try:
+        db = scoped_client(tenant.jwt)
+        res = (
+            db.table("clients")
+            .select("id, client_alias, opportunity_type, expected_value, close_probability, score, priority_score, status, battery_opportunity_score")
+            .eq("company_id", tenant.company_id)
+            .neq("status", "Closed")
+            .execute()
+        )
+        # Sort by priority_score descending
+        data = sorted(
+            res.data or [],
+            key=lambda c: (c.get("priority_score", 0) or 0),
+            reverse=True
+        )
+
+        # Enrichment with display names
+        for c in data:
+            slug = c.get("opportunity_type")
+            c["opportunity_type_display"] = opportunity_display_es(slug)
+
+        return success_response(data[:5])
+    except Exception as e:
+        logger.exception("top_priority failed company_id=%s", getattr(tenant, "company_id", None))
+        return error_response(str(e))
 
 
 @app.get("/api/weekly-priority")
@@ -3217,16 +3266,16 @@ def weekly_priority(request: Request, current_user: OptionalCurrentUser, limit: 
     try:
         if not current_user:
             logger.info("weekly_priority: no authenticated user context")
-            return []
+            return success_response([])
 
         if not current_user.company_id:
             logger.info("weekly_priority: user without company_id user_id=%s", current_user.id)
-            return []
+            return success_response([])
 
         user_jwt = getattr(request.state, "user_jwt", "")
         if not user_jwt:
             logger.warning("weekly_priority: missing user_jwt user_id=%s", current_user.id)
-            return []
+            return success_response([])
 
         db = scoped_client(user_jwt)
         safe_limit = max(1, min(limit, 100))
@@ -3250,46 +3299,52 @@ def weekly_priority(request: Request, current_user: OptionalCurrentUser, limit: 
             row["opportunity_type_display"] = opportunity_display_es(slug)
             row["status_display"] = pipeline_status_display_es(row.get("status"))
 
-        return _json_safe(data)
-    except Exception:
+        return success_response(_json_safe(data))
+    except Exception as e:
         logger.exception(
             "weekly_priority failed user_id=%s company_id=%s",
             getattr(current_user, "id", None),
             getattr(current_user, "company_id", None),
         )
-        return []
+        return error_response(str(e))
 
 
 @app.get("/api/hot-leads")
 @limiter.limit("30/minute")
 def hot_leads(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = (
-        db.table("clients")
-        .select("client_alias, opportunity_type, expected_value, close_probability, status")
-        .eq("company_id", tenant.company_id)
-        .gte("close_probability", 0.6)
-        .neq("status", "Closed")
-        .execute()
-    )
-    return res.data
+    try:
+        db = scoped_client(tenant.jwt)
+        res = (
+            db.table("clients")
+            .select("client_alias, opportunity_type, expected_value, close_probability, status")
+            .eq("company_id", tenant.company_id)
+            .gte("close_probability", 0.6)
+            .neq("status", "Closed")
+            .execute()
+        )
+        return success_response(res.data or [])
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.get("/api/revenue-at-risk")
 @limiter.limit("30/minute")
 def revenue_at_risk(request: Request, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    threshold_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    
-    res = (
-        db.table("clients")
-        .select("client_alias, opportunity_type, expected_value, status, last_contact_at")
-        .eq("company_id", tenant.company_id)
-        .neq("status", "Closed")
-        .or_(f"last_contact_at.is.null,last_contact_at.lt.{threshold_date}")
-        .execute()
-    )
-    return res.data
+    try:
+        db = scoped_client(tenant.jwt)
+        threshold_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+
+        res = (
+            db.table("clients")
+            .select("client_alias, opportunity_type, expected_value, status, last_contact_at")
+            .eq("company_id", tenant.company_id)
+            .neq("status", "Closed")
+            .or_(f"last_contact_at.is.null,last_contact_at.lt.{threshold_date}")
+            .execute()
+        )
+        return success_response(res.data or [])
+    except Exception as e:
+        return error_response(str(e))
 
 
 # Moved above
@@ -3297,51 +3352,59 @@ def revenue_at_risk(request: Request, tenant: Tenant):
 @app.post("/api/client/{client_id}/status")
 @limiter.limit("30/minute")
 def update_client_status(request: Request, client_id: str, payload: StatusUpdatePayload, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    
-    update_data = {
-        "status": payload.status,
-        "status_updated_at": datetime.now(timezone.utc).isoformat()
-    }
-    
-    if payload.status == "Closed":
-        update_data["closed_value"] = payload.closed_value
-    else:
-        update_data["closed_value"] = 0.0
-        
-    res = (
-        db.table("clients")
-        .update(update_data)
-        .eq("id", client_id)
-        .eq("company_id", tenant.company_id)
-        .execute()
-    )
-    
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Client not found or access denied")
-        
-    db.table("opportunity_events").insert({
-        "client_id": client_id,
-        "company_id": tenant.company_id,
-        "event_type": "status_updated",
-        "event_description": f"Status updated to {payload.status}"
-    }).execute()
-        
-    return res.data[0]
+    try:
+        db = scoped_client(tenant.jwt)
+
+        update_data = {
+            "status": payload.status,
+            "status_updated_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        if payload.status == "Closed":
+            update_data["closed_value"] = payload.closed_value
+        else:
+            update_data["closed_value"] = 0.0
+
+        res = (
+            db.table("clients")
+            .update(update_data)
+            .eq("id", client_id)
+            .eq("company_id", tenant.company_id)
+            .execute()
+        )
+
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Client not found or access denied")
+
+        db.table("opportunity_events").insert({
+            "client_id": client_id,
+            "company_id": tenant.company_id,
+            "event_type": "status_updated",
+            "event_description": f"Status updated to {payload.status}"
+        }).execute()
+
+        return success_response(res.data[0])
+    except HTTPException:
+        raise
+    except Exception as e:
+        return error_response(str(e))
 
 @app.get("/api/client/{client_id}/timeline")
 @limiter.limit("30/minute")
 def get_client_timeline(request: Request, client_id: str, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = (
-        db.table("opportunity_events")
-        .select("event_type, event_description, created_at")
-        .eq("client_id", client_id)
-        .eq("company_id", tenant.company_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
-    return res.data
+    try:
+        db = scoped_client(tenant.jwt)
+        res = (
+            db.table("opportunity_events")
+            .select("event_type, event_description, created_at")
+            .eq("client_id", client_id)
+            .eq("company_id", tenant.company_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return success_response(res.data or [])
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.get("/api/pipeline")
@@ -3357,16 +3420,16 @@ def pipeline(request: Request, current_user: OptionalCurrentUser):
 
         if not current_user:
             logger.info("pipeline: no authenticated user context")
-            return {"data": grouped_data}
+            return success_response(grouped_data)
 
         if not current_user.company_id:
             logger.info("pipeline: user without company_id user_id=%s", current_user.id)
-            return {"data": grouped_data}
+            return success_response(grouped_data)
 
         user_jwt = getattr(request.state, "user_jwt", "")
         if not user_jwt:
             logger.warning("pipeline: missing user_jwt user_id=%s", current_user.id)
-            return {"data": grouped_data}
+            return success_response(grouped_data)
 
         db = scoped_client(user_jwt)
         logger.info("pipeline: fetching clients for company_id=%s", current_user.company_id)
@@ -3390,41 +3453,37 @@ def pipeline(request: Request, current_user: OptionalCurrentUser):
             grouped_data[status_value].append(c)
 
         print("PIPELINE GROUPED:", grouped_data)
-        return {"data": _json_safe(grouped_data)}
-    except Exception:
+        return success_response(_json_safe(grouped_data))
+    except Exception as e:
         logger.exception(
             "pipeline failed user_id=%s company_id=%s",
             getattr(current_user, "id", None),
             getattr(current_user, "company_id", None),
         )
-        return {
-            "data": {
-                "New": [],
-                "Contacted": [],
-                "Proposal": [],
-                "Closed": [],
-            }
-        }
+        return error_response(str(e))
 
 
 @app.get("/api/opportunities")
 @limiter.limit("30/minute")
 def opportunities(request: Request, tenant: AuthTenant, limit: int = 100):
-    db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
-    safe_limit = max(1, min(limit, 500))
-    res = (
-        db.table("clients")
-        .select("id, client_alias, opportunity_type, expected_value, score, priority_score, status")
-        .eq("company_id", tenant.company_id)
-        .gte("score", 40)
-        .order("priority_score", desc=True)
-        .limit(safe_limit)
-        .execute()
-    )
-    data = res.data or []
-    for item in data:
-        item["opportunity_type_display"] = opportunity_display_es(item.get("opportunity_type"))
-    return data
+    try:
+        db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
+        safe_limit = max(1, min(limit, 500))
+        res = (
+            db.table("clients")
+            .select("id, client_alias, opportunity_type, expected_value, score, priority_score, status")
+            .eq("company_id", tenant.company_id)
+            .gte("score", 40)
+            .order("priority_score", desc=True)
+            .limit(safe_limit)
+            .execute()
+        )
+        data = res.data or []
+        for item in data:
+            item["opportunity_type_display"] = opportunity_display_es(item.get("opportunity_type"))
+        return success_response(data)
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.get("/api/revenue-recovery")
@@ -3457,12 +3516,10 @@ def revenue_recovery(request: Request, tenant: Tenant):
             )
             recovery_clients = res.data or []
 
-        if not recovery_clients:
-            return {"data": [], "message": "No data yet", "error": None}
-        return {"data": recovery_clients, "error": None}
+        return success_response(recovery_clients or [])
     except Exception as e:
         print("ERROR IN revenue_recovery:", str(e))
-        return {"data": [], "error": None}
+        return error_response(str(e))
 
 
 @app.get("/api/opportunity-performance")
@@ -3491,7 +3548,7 @@ def opportunity_performance(request: Request, tenant: Tenant):
             has_relational_leads = False
 
         if not rows:
-            return {"data": [], "message": "No data yet", "error": None}
+            return success_response([])
 
         performance_map = {}
         for c in rows:
@@ -3516,12 +3573,10 @@ def opportunity_performance(request: Request, tenant: Tenant):
                 "conversion_rate": round(rate, 2)
             })
 
-        if not result:
-            return {"data": [], "message": "No data yet", "error": None}
-        return {"data": sorted(result, key=lambda x: x["lead_count"], reverse=True), "error": None}
+        return success_response(sorted(result, key=lambda x: x["lead_count"], reverse=True))
     except Exception as e:
         print("ERROR IN opportunity_performance:", str(e))
-        return {"data": [], "error": None}
+        return error_response(str(e))
 
 
 @app.get("/api/portal-leads")
@@ -3570,91 +3625,104 @@ def get_portal_leads(request: Request, tenant: Tenant):
                 "status_display": "Nuevo lead desde portal" if lead.get("status") == "New" else lead.get("status"),
             } for lead in rows]
 
-        if not leads:
-            return {"data": [], "message": "No data yet", "error": None}
-        return {"data": leads, "error": None}
+        return success_response(leads or [])
     except Exception as e:
         print("ERROR IN get_portal_leads:", str(e))
-        return {"data": [], "error": None}
+        return error_response(str(e))
 
 
 @app.get("/api/client/{client_id}/portal-analytics")
 @limiter.limit("30/minute")
 def get_portal_analytics(request: Request, client_id: str, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    
-    # Verify client ownership
-    check = db.table("clients").select("id").eq("id", client_id).eq("company_id", tenant.company_id).single().execute()
-    if not check.data:
-        raise HTTPException(status_code=404, detail="Client not found")
-        
-    events_res = (
-        db.table("portal_events")
-        .select("event_type, created_at")
-        .eq("client_id", client_id)
-        .eq("company_id", tenant.company_id)
-        .execute()
-    )
-    
-    events = events_res.data or []
-    
-    portal_views = sum(1 for e in events if e["event_type"] == "portal_opened")
-    proposal_downloads = sum(1 for e in events if e["event_type"] == "proposal_downloaded")
-    consultation_requests = sum(1 for e in events if e["event_type"] == "consultation_requested")
-    
-    last_viewed = None
-    view_events = [e for e in events if e["event_type"] == "portal_opened"]
-    if view_events:
-        last_viewed = max(v["created_at"] for v in view_events)
-        
-    return {
-        "portal_views": portal_views,
-        "proposal_downloads": proposal_downloads,
-        "consultation_requests": consultation_requests,
-        "last_viewed_at": last_viewed
-    }
+    try:
+        db = scoped_client(tenant.jwt)
+
+        # Verify client ownership
+        check = db.table("clients").select("id").eq("id", client_id).eq("company_id", tenant.company_id).single().execute()
+        if not check.data:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        events_res = (
+            db.table("portal_events")
+            .select("event_type, created_at")
+            .eq("client_id", client_id)
+            .eq("company_id", tenant.company_id)
+            .execute()
+        )
+
+        events = events_res.data or []
+
+        portal_views = sum(1 for e in events if e["event_type"] == "portal_opened")
+        proposal_downloads = sum(1 for e in events if e["event_type"] == "proposal_downloaded")
+        consultation_requests = sum(1 for e in events if e["event_type"] == "consultation_requested")
+
+        last_viewed = None
+        view_events = [e for e in events if e["event_type"] == "portal_opened"]
+        if view_events:
+            last_viewed = max(v["created_at"] for v in view_events)
+
+        return success_response({
+            "portal_views": portal_views,
+            "proposal_downloads": proposal_downloads,
+            "consultation_requests": consultation_requests,
+            "last_viewed_at": last_viewed
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.get("/api/client/{client_id}")
 @limiter.limit("30/minute")
 def get_client(request: Request, client_id: str, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = db.table("clients").select("*").eq("id", client_id).eq("company_id", tenant.company_id).single().execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Client not found")
-    return res.data
+    try:
+        db = scoped_client(tenant.jwt)
+        res = db.table("clients").select("*").eq("id", client_id).eq("company_id", tenant.company_id).single().execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Client not found")
+        return success_response(res.data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.post("/api/client/{client_id}/contacted")
 @limiter.limit("30/minute")
 def client_contacted(request: Request, client_id: str, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    
-    # Needs to check current status to potentially upgrade New -> Contacted
-    status_res = db.table("clients").select("status").eq("id", client_id).eq("company_id", tenant.company_id).execute()
-    
-    if not status_res.data:
-        raise HTTPException(status_code=404, detail="Client not found or access denied")
-        
-    current_status = status_res.data[0].get("status")
-    now_ts = datetime.now(timezone.utc).isoformat()
-    
-    update_data = {
-        "last_contact_at": now_ts
-    }
-    
-    if current_status == "New":
-        update_data["status"] = "Contacted"
-        update_data["status_updated_at"] = now_ts
-        
-    res = (
-        db.table("clients")
-        .update(update_data)
-        .eq("id", client_id)
-        .eq("company_id", tenant.company_id)
-        .execute()
-    )
-    return res.data[0]
+    try:
+        db = scoped_client(tenant.jwt)
+
+        # Needs to check current status to potentially upgrade New -> Contacted
+        status_res = db.table("clients").select("status").eq("id", client_id).eq("company_id", tenant.company_id).execute()
+
+        if not status_res.data:
+            raise HTTPException(status_code=404, detail="Client not found or access denied")
+
+        current_status = status_res.data[0].get("status")
+        now_ts = datetime.now(timezone.utc).isoformat()
+
+        update_data = {
+            "last_contact_at": now_ts
+        }
+
+        if current_status == "New":
+            update_data["status"] = "Contacted"
+            update_data["status_updated_at"] = now_ts
+
+        res = (
+            db.table("clients")
+            .update(update_data)
+            .eq("id", client_id)
+            .eq("company_id", tenant.company_id)
+            .execute()
+        )
+        return success_response(res.data[0] if res.data else None)
+    except HTTPException:
+        raise
+    except Exception as e:
+        return error_response(str(e))
 
 
 # Moved above
@@ -3662,44 +3730,54 @@ def client_contacted(request: Request, client_id: str, tenant: Tenant):
 @app.post("/api/client/{client_id}/notes")
 @limiter.limit("30/minute")
 def update_client_notes(request: Request, client_id: str, payload: NotesUpdatePayload, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    
-    update_data = {
-        "notes": payload.notes,
-        "updated_at": datetime.now(timezone.utc).isoformat()
-    }
-    
-    res = (
-        db.table("clients")
-        .update(update_data)
-        .eq("id", client_id)
-        .eq("company_id", tenant.company_id)
-        .execute()
-    )
-    
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Client not found or update failed")
-        
-    return res.data[0]
+    try:
+        db = scoped_client(tenant.jwt)
+
+        update_data = {
+            "notes": payload.notes,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        res = (
+            db.table("clients")
+            .update(update_data)
+            .eq("id", client_id)
+            .eq("company_id", tenant.company_id)
+            .execute()
+        )
+
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Client not found or update failed")
+
+        return success_response(res.data[0])
+    except HTTPException:
+        raise
+    except Exception as e:
+        return error_response(str(e))
 
 
 @app.get("/api/client/{client_id}/email-draft")
 @limiter.limit("30/minute")
 def get_client_email_draft(request: Request, client_id: str, tenant: Tenant):
-    db = scoped_client(tenant.jwt)
-    res = (
-        db.table("clients")
-        .select("id, client_alias, opportunity_type, expected_value, estimated_battery_savings, battery_payback_years, sales_script_short")
-        .eq("id", client_id)
-        .eq("company_id", tenant.company_id)
-        .single()
-        .execute()
-    )
+    try:
+        db = scoped_client(tenant.jwt)
+        res = (
+            db.table("clients")
+            .select("id, client_alias, opportunity_type, expected_value, estimated_battery_savings, battery_payback_years, sales_script_short")
+            .eq("id", client_id)
+            .eq("company_id", tenant.company_id)
+            .single()
+            .execute()
+        )
 
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Client not found")
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Client not found")
 
-    return build_sales_email_draft(res.data)
+        return success_response(build_sales_email_draft(res.data))
+    except HTTPException:
+        raise
+    except Exception as e:
+        return error_response(str(e))
 
 
 # Moved above
@@ -3759,11 +3837,11 @@ def log_sales_action(request: Request, client_id: str, payload: SalesActionPaylo
     db.table("clients").update(update_data).eq("id", client_id).eq("company_id", tenant.company_id).execute()
 
     event_row = event_res.data[0] if event_res.data else None
-    return {
+    return success_response({
         "success": True,
         "message": "Acción comercial registrada",
         "event": event_row,
-    }
+    })
 
 
 # ─── Endpoints: Client Portal Foundation (BLOCK F8) ────────────────────────
@@ -3789,7 +3867,7 @@ def enable_client_portal(request: Request, client_id: str, tenant: Tenant):
     if not res.data:
         raise HTTPException(status_code=404, detail="Client not found or update failed")
         
-    return {"portal_url": f"/portal/{token}"}
+    return success_response({"portal_url": f"/portal/{token}"})
 
 
 @app.post("/api/client/{client_id}/send-portal")
@@ -3824,7 +3902,7 @@ def send_client_portal(request: Request, client_id: str, tenant: Tenant):
     if not update_res.data:
         raise HTTPException(status_code=500, detail="Failed to generate portal")
         
-    return {"portal_url": f"/portal/{token}"}
+    return success_response({"portal_url": f"/portal/{token}"})
 
 
 @app.get("/api/public/portal/{token}")
@@ -3853,7 +3931,7 @@ def get_public_portal(request: Request, token: str):
     except Exception as e:
         logger.warning("Failed to log portal_opened event: %s", str(e))
         
-    return res.data
+    return success_response(res.data or {})
 
 
 @app.post("/api/public/portal/{token}/request-proposal")
@@ -3886,7 +3964,7 @@ def request_portal_proposal(request: Request, token: str):
     
     if existing_lead.data:
         logger.info("Duplicate portal lead prevented")
-        return {"success": True}
+        return success_response({"success": True})
         
     res_lead = (
         admin_client.table("portal_leads")
@@ -3956,40 +4034,40 @@ def request_portal_proposal(request: Request, token: str):
         except Exception as email_err:
             logger.error(f"Failed to send proposal notification email: {email_err}")
 
-    return {"success": True}
+    return success_response({"success": True})
 
 
 # ─── Endpoints: System Diagnostics & Health (BLOCK R5) ────────────────────────
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return success_response({"status": "ok"})
 
 
 @app.get("/api/import/status")
 @limiter.limit("30/minute")
 def import_status(request: Request, tenant: AuthTenant):
-    return {
+    return success_response({
         "last_import_rows": int(LAST_IMPORT_STATUS.get("last_import_rows", 0)),
         "last_import_duration": float(LAST_IMPORT_STATUS.get("last_import_duration", 0.0)),
         "last_import_opportunities": int(LAST_IMPORT_STATUS.get("last_import_opportunities", 0)),
-    }
+    })
 
 
 @app.get("/api/auth/status")
 @limiter.limit("30/minute")
 def auth_status(request: Request, current_user: CurrentUser):
-    return {
+    return success_response({
         "user_id": current_user.id,
         "status": "authenticated",
-    }
+    })
 
 
 @app.get("/internal/metrics/csv", include_in_schema=False)
 @limiter.limit("30/minute")
 def internal_csv_metrics(request: Request, tenant: InternalMetricsTenant):
     logger.info("CSV metrics accessed")
-    return _get_csv_ingestion_metrics_snapshot()
+    return success_response(_get_csv_ingestion_metrics_snapshot())
 
 
 @app.get("/health/pipeline")
@@ -4005,25 +4083,25 @@ def health_pipeline(request: Request, tenant: AuthTenant):
     scoring_status = "ok" if callable(core_score_all_installations) else "error"
     scheduler_status = "running" if getattr(scheduler, "running", False) else "stopped"
 
-    return {
+    return success_response({
         "database": database_status,
         "supabase": database_status,
         "auth": auth_status,
         "scoring_engine": scoring_status,
         "scheduler": scheduler_status,
-    }
+    })
 
 
 @app.get("/version")
 @limiter.limit("60/minute")
 def version(request: Request):
-    return {"version": DEPLOY_VERSION}
+    return success_response({"version": DEPLOY_VERSION})
 
 
 @app.get("/api/version")
 @limiter.limit("60/minute")
 def api_version(request: Request):
-    return {"version": DEPLOY_VERSION}
+    return success_response({"version": DEPLOY_VERSION})
 
 
 @app.get("/api/system-check")
@@ -4045,12 +4123,12 @@ def system_check(request: Request):
     inst_res = admin_client.table("installations").select("id", count="exact").execute()
     installations_count = inst_res.count if hasattr(inst_res, "count") and inst_res.count is not None else len(inst_res.data)
     
-    return {
+    return success_response({
         "clients_count": clients_count,
         "companies_count": companies_count,
         "users_count": users_count,
         "installations_count": installations_count
-    }
+    })
 
 
 @app.get("/db-test")
@@ -4090,7 +4168,7 @@ def db_test(request: Request):
                     (company_id, 2020, 5.0, "DB Test Inverter", False, "residential", "ES"),
                 )
                 inserted_id = cur.fetchone()[0]
-        return {"inserted_id": str(inserted_id)}
+        return success_response({"inserted_id": str(inserted_id)})
     except HTTPException:
         raise
     except psycopg2.Error:
