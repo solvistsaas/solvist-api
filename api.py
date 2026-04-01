@@ -945,9 +945,9 @@ def core_score_all_installations():
                         # Dynamic generation of client_alias using UUID snippet
                         raw_payload = inst.get("raw_payload") if isinstance(inst.get("raw_payload"), dict) else {}
                         inst_company_id = str(inst.get("company_id") or company_id).strip()
-                        inst_kwp = inst.get("kwp")
+                        inst_kwp = inst.get("system_size_kwp")
                         if inst_kwp is None:
-                            inst_kwp = inst.get("system_size_kwp")
+                            inst_kwp = inst.get("kwp")
                         if inst_kwp is None:
                             inst_kwp = raw_payload.get("kwp", raw_payload.get("system_size_kwp"))
                         inst_year = inst.get("installation_year")
@@ -1015,8 +1015,8 @@ def core_score_all_installations():
                             "weighted_expected_revenue": 10.0,
                             "anonymous_client": True,
                             "system_size_kwp": float(
-                                first_inst.get("kwp")
-                                or first_inst.get("system_size_kwp")
+                                first_inst.get("system_size_kwp")
+                                or first_inst.get("kwp")
                                 or first_raw.get("kwp")
                                 or first_raw.get("system_size_kwp")
                                 or 0
@@ -2731,10 +2731,10 @@ def dashboard(request: Request, tenant: AuthTenant):
 
         window_pct = round((active_window / total_scored * 100), 1) if total_scored > 0 else 0
 
-        # 4. Estimated potential value (Filtered query join on kwp, isolated to current_month)
+        # 4. Estimated potential value (Filtered query join on system_size_kwp, isolated to current_month)
         active_kwp_res = (
             db.table("opportunity_scores")
-            .select("installations!inner(kwp)")
+            .select("installations!inner(system_size_kwp)")
             .eq("company_id", tenant.company_id)
             .eq("calculated_month", current_month)
             .gt("total_score", active_threshold)
@@ -2744,7 +2744,7 @@ def dashboard(request: Request, tenant: AuthTenant):
         for row in (active_kwp_res.data or []):
             inst = row.get("installations", {})
             if inst and isinstance(inst, dict):
-                active_kwp += inst.get("kwp") or 0
+                active_kwp += inst.get("system_size_kwp") or inst.get("kwp") or 0
         pot_value = round(active_kwp * 1500, 2)  # Proxy calculation
 
         # Top 5 clients (Isolated to current month)
@@ -2934,7 +2934,7 @@ def generate_activation_pdf(request: Request, installation_id: str, tenant: Tena
     pdf.cell(0, 10, "1. Datos del Sistema Analizado", ln=True)
     pdf.set_font("Helvetica", "", 11)
     pdf.set_text_color(180, 190, 210)
-    pdf.cell(0, 8, f"Potencia Instalada: {inst.get('kwp', 0)} kWp", ln=True)
+    pdf.cell(0, 8, f"Potencia Instalada: {inst.get('system_size_kwp', inst.get('kwp', 0))} kWp", ln=True)
     pdf.cell(0, 8, f"Despliegue inicial: Año {inst.get('installation_year')}", ln=True)
     pdf.cell(0, 8, f"Tipo de consumo: {str(inst.get('location_type')).capitalize()}", ln=True)
     pdf.ln(5)
@@ -3494,24 +3494,25 @@ def revenue_recovery(request: Request, tenant: Tenant):
         try:
             res = (
                 db.table("clients")
-                .select("id, client_alias, opportunity_type, expected_value, portal_invited, portal_leads(id)")
+                .select("id, client_alias, opportunity_type, expected_value, portal_leads(id)")
                 .eq("company_id", tenant.company_id)
-                .eq("portal_invited", True)
-                .eq("portal_enabled", True)
                 .execute()
             )
             rows = res.data or []
-            recovery_clients = [client for client in rows if not client.get("portal_leads")]
-            for client in recovery_clients:
-                client.pop("portal_leads", None)
+            recovery_clients = []
+            for client in rows:
+                portal_leads_value = client.get("portal_leads")
+                portal_leads_list = portal_leads_value if isinstance(portal_leads_value, list) else []
+                if len(portal_leads_list) == 0:
+                    safe_client = dict(client)
+                    safe_client.pop("portal_leads", None)
+                    recovery_clients.append(safe_client)
         except Exception:
             # Fallback if relational join is unavailable
             res = (
                 db.table("clients")
-                .select("id, client_alias, opportunity_type, expected_value, portal_invited")
+                .select("id, client_alias, opportunity_type, expected_value")
                 .eq("company_id", tenant.company_id)
-                .eq("portal_invited", True)
-                .eq("portal_enabled", True)
                 .execute()
             )
             recovery_clients = res.data or []
@@ -3530,7 +3531,7 @@ def opportunity_performance(request: Request, tenant: Tenant):
         try:
             res = (
                 db.table("clients")
-                .select("opportunity_type, portal_invited, portal_leads(id)")
+                .select("opportunity_type, portal_leads(id)")
                 .eq("company_id", tenant.company_id)
                 .execute()
             )
@@ -3540,7 +3541,7 @@ def opportunity_performance(request: Request, tenant: Tenant):
             # Fallback if relational join is unavailable
             res = (
                 db.table("clients")
-                .select("opportunity_type, portal_invited")
+                .select("opportunity_type")
                 .eq("company_id", tenant.company_id)
                 .execute()
             )
@@ -3558,7 +3559,11 @@ def opportunity_performance(request: Request, tenant: Tenant):
             if opp_type not in performance_map:
                 performance_map[opp_type] = {"detected_count": 0, "lead_count": 0}
             performance_map[opp_type]["detected_count"] += 1
-            leads = c.get("portal_leads") or [] if has_relational_leads else []
+            if has_relational_leads:
+                portal_leads_value = c.get("portal_leads")
+                leads = portal_leads_value if isinstance(portal_leads_value, list) else []
+            else:
+                leads = []
             performance_map[opp_type]["lead_count"] += len(leads)
 
         result = []
@@ -3584,11 +3589,12 @@ def opportunity_performance(request: Request, tenant: Tenant):
 def get_portal_leads(request: Request, tenant: Tenant):
     try:
         db = scoped_client(tenant.jwt)
+        company_id = tenant.company_id
         try:
             res = (
                 db.table("portal_leads")
                 .select("id, interest_type, requested_at, status, clients!inner(client_alias, company_id)")
-                .eq("clients.company_id", tenant.company_id)
+                .eq("clients.company_id", company_id)
                 .order("requested_at", desc=True)
                 .limit(10)
                 .execute()
@@ -3607,23 +3613,32 @@ def get_portal_leads(request: Request, tenant: Tenant):
                     "status_display": "Nuevo lead desde portal" if status_raw == "New" else status_raw
                 })
         except Exception:
-            # Fallback without join if relational syntax fails
-            res = (
-                db.table("portal_leads")
-                .select("id, interest_type, requested_at, status")
-                .order("requested_at", desc=True)
-                .limit(10)
-                .execute()
-            )
-            rows = res.data or []
-            leads = [{
-                "id": lead.get("id"),
-                "client_alias": "Cliente",
-                "interest_type": lead.get("interest_type"),
-                "requested_at": lead.get("requested_at"),
-                "status": lead.get("status"),
-                "status_display": "Nuevo lead desde portal" if lead.get("status") == "New" else lead.get("status"),
-            } for lead in rows]
+            # Fallback with strict tenant filter.
+            # If table/column is missing, return empty data safely (never query globally).
+            try:
+                res = (
+                    db.table("portal_leads")
+                    .select("id, interest_type, requested_at, status")
+                    .eq("company_id", company_id)
+                    .order("requested_at", desc=True)
+                    .limit(10)
+                    .execute()
+                )
+                rows = res.data or []
+                leads = [{
+                    "id": lead.get("id"),
+                    "client_alias": "Cliente",
+                    "interest_type": lead.get("interest_type"),
+                    "requested_at": lead.get("requested_at"),
+                    "status": lead.get("status"),
+                    "status_display": "Nuevo lead desde portal" if lead.get("status") == "New" else lead.get("status"),
+                } for lead in rows]
+            except Exception:
+                logger.warning(
+                    "portal_leads fallback unavailable for company_id=%s; returning empty set",
+                    company_id,
+                )
+                leads = []
 
         return success_response(leads or [])
     except Exception as e:
@@ -4156,7 +4171,7 @@ def db_test(request: Request):
                     INSERT INTO public.installations (
                         company_id,
                         installation_year,
-                        kwp,
+                        system_size_kwp,
                         inverter_model,
                         has_battery,
                         location_type,
