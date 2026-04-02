@@ -706,6 +706,36 @@ def error_response(message):
     }
 
 
+def create_opportunity_from_alert(alert: Dict, score: Optional[Dict] = None) -> Dict:
+    score = score or {}
+
+    estimated_value_raw = alert.get("estimated_value")
+    if estimated_value_raw is None:
+        estimated_value_raw = score.get("expected_value")
+
+    probability_raw = alert.get("probability")
+    if probability_raw is None:
+        probability_raw = score.get("close_probability")
+
+    opportunity_type = (
+        alert.get("type")
+        or alert.get("alert_type")
+        or score.get("opportunity_type")
+        or "unknown"
+    )
+
+    return {
+        "company_id": alert.get("company_id") or score.get("company_id"),
+        "alert_id": alert.get("id"),
+        "client_id": alert.get("client_id") or score.get("id"),
+        "installation_id": alert.get("installation_id") or score.get("installation_id"),
+        "opportunity_type": opportunity_type,
+        "estimated_value": float(estimated_value_raw or 0),
+        "probability": float(probability_raw or 0),
+        "status": "new",
+    }
+
+
 def build_sales_email_draft(client: Dict) -> Dict[str, str]:
     alias = client.get("client_alias") or "Cliente"
     opportunity_slug = client.get("opportunity_type")
@@ -1108,7 +1138,41 @@ def core_score_all_installations():
                                         "alert_message": f"High value battery opportunity detected for client {alias}.\nEstimated savings €{sav}.\nPayback {pay} years."
                                     })
                             if alerts_payload:
-                                admin_client.table("opportunity_alerts").insert(alerts_payload).execute()
+                                alerts_insert_res = admin_client.table("opportunity_alerts").insert(alerts_payload).execute()
+
+                                # Persist opportunities from created alerts (idempotent on alert_id)
+                                try:
+                                    inserted_alerts = alerts_insert_res.data or []
+                                    if inserted_alerts:
+                                        score_by_client_id = {
+                                            str(row.get("id")): row
+                                            for row in (clients_upsert_res.data or [])
+                                            if row.get("id")
+                                        }
+                                        opportunities_payload: List[Dict] = []
+                                        for alert_row in inserted_alerts:
+                                            client_id_key = str(alert_row.get("client_id") or "")
+                                            score_row = score_by_client_id.get(client_id_key, {})
+                                            opportunity_row = create_opportunity_from_alert(alert_row, score_row)
+                                            if (
+                                                not opportunity_row.get("company_id")
+                                                or not opportunity_row.get("alert_id")
+                                                or not opportunity_row.get("opportunity_type")
+                                            ):
+                                                continue
+                                            opportunities_payload.append(opportunity_row)
+
+                                        if opportunities_payload:
+                                            admin_client.table("opportunities").upsert(
+                                                opportunities_payload,
+                                                on_conflict="alert_id",
+                                                ignore_duplicates=True,
+                                            ).execute()
+                                except Exception as opportunity_error:
+                                    logger.warning(
+                                        "ENGINE: opportunity persistence failed after alerts insert: %s",
+                                        opportunity_error,
+                                    )
                         
                     total_installations_scored += len(upsert_payload)
                     logger.info(
@@ -1232,119 +1296,6 @@ app.state.limiter = limiter
 async def preflight_handler(rest_of_path: str):
     return success_response({"status": "ok"})
 
-
-@app.get("/api/debug/routes")
-def debug_routes():
-    try:
-        return success_response([route.path for route in app.routes])
-    except Exception as e:
-        return error_response(str(e))
-
-
-@app.get("/api/debug/auth-check")
-def debug_auth(current_user: CurrentUser):
-    try:
-        return success_response({
-            "user_id": current_user.id,
-            "tenant_id": current_user.company_id,
-            "email": current_user.email,
-        })
-    except Exception as e:
-        return error_response(str(e))
-
-
-@app.get("/api/debug/installations-count")
-def debug_installations_count(current_user: CurrentUser):
-    try:
-        company_id = current_user.company_id
-        if not company_id:
-            raise HTTPException(status_code=403, detail="User has no tenant assigned")
-        res = (
-            admin_client.table("installations")
-            .select("*")
-            .eq("company_id", company_id)
-            .execute()
-        )
-        return success_response({
-            "count": len(res.data or []),
-            "company_id": company_id,
-            "installations": (res.data or [])[:5],
-        })
-    except HTTPException:
-        raise
-    except Exception as e:
-        return error_response(str(e))
-
-
-@app.get("/api/debug/full-dump")
-def debug_full_dump():
-    try:
-        companies = admin_client.table("companies").select("*").execute()
-        print("COMPANIES RAW RESPONSE:", companies)
-        companies_data = companies.data or []
-    except Exception as e:
-        print("ERROR COMPANIES:", str(e))
-        companies_data = []
-
-    try:
-        installations = admin_client.table("installations").select("*").execute()
-        print("INSTALLATIONS RAW RESPONSE:", installations)
-        installations_data = installations.data or []
-    except Exception as e:
-        print("ERROR INSTALLATIONS:", str(e))
-        installations_data = []
-
-    try:
-        clients = admin_client.table("clients").select("*").execute()
-        print("CLIENTS RAW RESPONSE:", clients)
-        clients_data = clients.data or []
-    except Exception as e:
-        print("ERROR CLIENTS:", str(e))
-        clients_data = []
-
-    return success_response({
-        "companies": companies_data,
-        "installations": installations_data,
-        "clients": clients_data,
-        "counts": {
-            "companies": len(companies_data),
-            "installations": len(installations_data),
-            "clients": len(clients_data),
-        },
-    })
-
-
-@app.get("/api/debug/test-company-loop")
-def test_company_loop():
-    try:
-        companies = admin_client.table("companies").select("*").execute().data or []
-
-        result = []
-
-        for company in companies:
-            try:
-                raw_company_id = company.get("id") or company.get("company_id")
-                company_id = str(raw_company_id).strip() if raw_company_id else None
-
-                installations = admin_client.table("installations").select("*").execute().data or []
-
-                result.append({
-                    "company": company,
-                    "company_id": company_id,
-                    "installations_count": len(installations),
-                    "status": "OK"
-                })
-
-            except Exception as e:
-                result.append({
-                    "company": company,
-                    "error": str(e),
-                    "status": "ERROR"
-                })
-
-        return success_response(result)
-    except Exception as e:
-        return error_response(str(e))
 
 
 def _request_id_for(request: Request) -> str:
@@ -2314,9 +2265,6 @@ def create_installation(
 
 
 # ─── Endpoints: Import Installations V1 ──────────────────────────────────────────
-# TEST AUTH
-# curl -H "Authorization: Bearer <TOKEN>" \
-# https://solvist-api-wbz1.onrender.com/api/debug/auth-check
 #
 # TEST IMPORT
 # curl -X POST https://solvist-api-wbz1.onrender.com/api/import/installations \
@@ -4152,49 +4100,3 @@ def system_check(request: Request):
         "users_count": users_count,
         "installations_count": installations_count
     })
-
-
-@app.get("/db-test")
-@limiter.limit("10/minute")
-def db_test(request: Request):
-    if ENVIRONMENT == "production":
-        raise HTTPException(status_code=404, detail="Not Found")
-
-    try:
-        conn = get_db_connection()
-    except Exception:
-        raise HTTPException(status_code=500, detail="Database connection not configured.")
-
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM public.companies ORDER BY created_at ASC LIMIT 1;")
-                row = cur.fetchone()
-                if not row:
-                    raise HTTPException(status_code=400, detail="No company found to attach installation.")
-                company_id = row[0]
-
-                cur.execute(
-                    """
-                    INSERT INTO public.installations (
-                        company_id,
-                        installation_year,
-                        system_size_kwp,
-                        inverter_model,
-                        has_battery,
-                        location_type,
-                        country
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id;
-                    """,
-                    (company_id, 2020, 5.0, "DB Test Inverter", False, "residential", "ES"),
-                )
-                inserted_id = cur.fetchone()[0]
-        return success_response({"inserted_id": str(inserted_id)})
-    except HTTPException:
-        raise
-    except psycopg2.Error:
-        raise HTTPException(status_code=500, detail="Database insert failed.")
-    finally:
-        conn.close()
