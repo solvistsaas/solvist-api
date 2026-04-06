@@ -205,6 +205,7 @@ def _get_or_create_public_user(
     jwt_company_id: Optional[str],
     request: Optional[Request] = None,
 ) -> Dict:
+    global admin_client
     user_id = _normalize_jwt_sub(jwt_sub)
     users_table = admin_client.table("users")
 
@@ -213,8 +214,14 @@ def _get_or_create_public_user(
         user_res = users_table.select("*").eq("id", user_id).limit(1).execute()
         user = (user_res.data or [None])[0]
     except Exception:
-        _auth_log(logging.ERROR, "public_user_lookup_failed", request=request, user_id=user_id)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        try:
+            admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+            users_table = admin_client.table("users")
+            user_res = users_table.select("*").eq("id", user_id).limit(1).execute()
+            user = (user_res.data or [None])[0]
+        except Exception:
+            _auth_log(logging.ERROR, "public_user_lookup_failed", request=request, user_id=user_id)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     insert_payload: Dict[str, str] = {"id": user_id}
     if jwt_email:
@@ -809,6 +816,9 @@ def core_score_all_installations():
     if not scoring_lock.acquire(blocking=False):
         logger.warning("ENGINE: Scoring is already running. Skipping overlapping run.")
         return {"message": "Scoring already running", "skipped": True}
+
+    # Hide global admin_client with a localized client to prevent Server disconnected from affecting Auth
+    admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
     start_time = datetime.now(timezone.utc)
     print("USING ADMIN CLIENT FOR SCORING")
