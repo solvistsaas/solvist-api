@@ -4110,3 +4110,63 @@ def system_check(request: Request):
         "users_count": users_count,
         "installations_count": installations_count
     })
+
+
+# ========== ONBOARDING ENDPOINT ==========
+# Fix para crear company y asignar tenant al nuevo usuario
+
+class OnboardingRequest(BaseModel):
+    company_name: str = "Mi Empresa Solar"
+
+@app.post("/api/auth/onboarding")
+async def onboarding(
+    request: OnboardingRequest,
+    auth: HTTPAuthorizationCredentials = Depends(HTTPBearer())
+):
+    """
+    Called after signup to create company and assign tenant to user.
+    """
+    try:
+        token_data = verify_supabase_token(auth.credentials)
+        user_id = token_data.get("sub")
+        email = token_data.get("email")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        admin_sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+        company_response = admin_sb.table("companies").insert({
+            "name": request.company_name,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }).execute()
+
+        if not company_response.data:
+            raise HTTPException(status_code=500, detail="Failed to create company")
+
+        company_id = company_response.data[0]["id"]
+
+        user_response = admin_sb.table("users").upsert({
+            "id": user_id,
+            "email": email,
+            "company_id": company_id,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }).execute()
+
+        if not user_response.data:
+            raise HTTPException(status_code=500, detail="Failed to create user record")
+
+        logging.info(f"Onboarding successful: user={user_id}, company={company_id}")
+
+        return {
+            "status": "success",
+            "company_id": company_id,
+            "user_id": user_id,
+            "message": "Bienvenido a Solvist"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Onboarding error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Onboarding failed: {str(e)}")
