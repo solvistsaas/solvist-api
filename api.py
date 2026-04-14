@@ -376,11 +376,17 @@ async def get_current_user(
     request: Request,
     credentials: Annotated[Optional[HTTPAuthorizationCredentials], Depends(bearer_scheme)],
 ) -> CurrentUserContext:
-    token = _extract_authorization_bearer(request, credentials)
-    current_user = _resolve_current_user(token, request)
-    request.state.current_user = current_user
-    request.state.user_jwt = token
-    return current_user
+    try:
+        token = _extract_authorization_bearer(request, credentials)
+        current_user = _resolve_current_user(token, request)
+        request.state.current_user = current_user
+        request.state.user_jwt = token
+        return current_user
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in get_current_user: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 CurrentUser = Annotated[CurrentUserContext, Depends(get_current_user)]
