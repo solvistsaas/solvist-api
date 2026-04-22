@@ -2867,14 +2867,14 @@ def generate_activation_pdf(request: Request, installation_id: str, tenant: Tena
         .eq("company_id", tenant.company_id)
         .eq("installation_id", installation_id)
         .eq("calculated_month", current_month)
-        .single()
+        .limit(1)
         .execute()
     )
-    
+
     if not res.data:
         raise HTTPException(status_code=404, detail="Score/Installation not found or access denied")
-        
-    data = res.data
+
+    data = res.data[0]
     inst = data.get("installations", {})
     
     # ── FPDF Logic ── 
