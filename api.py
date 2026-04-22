@@ -2941,14 +2941,14 @@ def generate_proposal_pdf(request: Request, client_id: str, tenant: Tenant):
         .select("*")
         .eq("id", client_id)
         .eq("company_id", tenant.company_id)
-        .single()
+        .limit(1)
         .execute()
     )
-    
+
     if not res.data:
         raise HTTPException(status_code=404, detail="Client not found or access denied")
-        
-    client = res.data
+
+    client = res.data[0]
     
     # Generate Commercial Proposal PDF
     pdf = FPDF()
