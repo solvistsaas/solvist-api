@@ -3673,10 +3673,10 @@ def get_portal_analytics(request: Request, client_id: str, tenant: Tenant):
 def get_client(request: Request, client_id: str, tenant: Tenant):
     try:
         db = scoped_client(tenant.jwt)
-        res = db.table("clients").select("*").eq("id", client_id).eq("company_id", tenant.company_id).single().execute()
+        res = db.table("clients").select("*").eq("id", client_id).eq("company_id", tenant.company_id).limit(1).execute()
         if not res.data:
             raise HTTPException(status_code=404, detail="Client not found")
-        return success_response(res.data)
+        return success_response(res.data[0])
     except HTTPException:
         raise
     except Exception as e:
