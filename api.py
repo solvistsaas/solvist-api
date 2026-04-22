@@ -3845,56 +3845,50 @@ def log_sales_action(request: Request, client_id: str, payload: SalesActionPaylo
 @limiter.limit("10/minute")
 def enable_client_portal(request: Request, client_id: str, tenant: Tenant):
     db = scoped_client(tenant.jwt)
-    token = secrets.token_urlsafe(32)
-    
+
     res = (
         db.table("clients")
-        .update({
-            "portal_token": token,
-            "updated_at": datetime.now(timezone.utc).isoformat()
-        })
+        .update({"portal_enabled": True, "portal_invited": True})
         .eq("id", client_id)
         .eq("company_id", tenant.company_id)
         .execute()
     )
-    
+
     if not res.data:
         raise HTTPException(status_code=404, detail="Client not found or update failed")
-        
-    return success_response({"portal_url": f"/portal/{token}"})
+
+    return success_response({"portal_url": f"/portal/{client_id}"})
 
 
 @app.post("/api/client/{client_id}/send-portal")
 @limiter.limit("10/minute")
 def send_client_portal(request: Request, client_id: str, tenant: Tenant):
     db = scoped_client(tenant.jwt)
-    
-    client_res = db.table("clients").select("portal_token").eq("id", client_id).eq("company_id", tenant.company_id).single().execute()
-    
+
+    client_res = (
+        db.table("clients")
+        .select("id")
+        .eq("id", client_id)
+        .eq("company_id", tenant.company_id)
+        .limit(1)
+        .execute()
+    )
+
     if not client_res.data:
         raise HTTPException(status_code=404, detail="Client not found or access denied")
-        
-    token = client_res.data.get("portal_token")
-    if not token:
-        token = secrets.token_urlsafe(32)
-        
-    update_data = {
-        "portal_token": token,
-        "updated_at": datetime.now(timezone.utc).isoformat()
-    }
-    
+
     update_res = (
         db.table("clients")
-        .update(update_data)
+        .update({"portal_invited": True, "portal_enabled": True})
         .eq("id", client_id)
         .eq("company_id", tenant.company_id)
         .execute()
     )
-    
+
     if not update_res.data:
         raise HTTPException(status_code=500, detail="Failed to generate portal")
-        
-    return success_response({"portal_url": f"/portal/{token}"})
+
+    return success_response({"portal_url": f"/portal/{client_id}"})
 
 
 @app.get("/api/public/portal/{token}")
