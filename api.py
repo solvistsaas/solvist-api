@@ -1295,6 +1295,8 @@ app = FastAPI(title="Solvist Opportunity Intelligence", version="5.0.0", lifespa
 allowed_origins = [
     "https://solvist-frontend-2wag.vercel.app",
     "http://localhost:3000",
+    "http://localhost:8080",
+    "https://claude.ai"
 ]
 
 app.add_middleware(
