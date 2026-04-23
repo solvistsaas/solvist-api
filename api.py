@@ -1340,6 +1340,14 @@ def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 app.add_middleware(SlowAPIMiddleware)
 
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    import traceback as _tb
+    print(f"UNHANDLED 500 {request.method} {request.url.path}: {exc}", flush=True)
+    print(_tb.format_exc(), flush=True)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
 @app.post("/api/engine/score-all")
 @limiter.limit("5/minute")
 def score_all_installations(request: Request):
@@ -3680,6 +3688,8 @@ def get_client(request: Request, client_id: str, tenant: Tenant):
     except HTTPException:
         raise
     except Exception as e:
+        print(f"ERROR get_client client_id={client_id}: {e}", flush=True)
+        import traceback as _tb; print(_tb.format_exc(), flush=True)
         return error_response(str(e))
 
 
