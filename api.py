@@ -3043,8 +3043,8 @@ def generate_proposal_pdf(request: Request, client_id: str, tenant: Tenant):
     db.table("opportunity_alerts").insert({
         "client_id": client_id,
         "company_id": tenant.company_id,
-        "event_type": "proposal_generated",
-        "event_description": "Generated Commercial Proposal PDF"
+        "alert_type": "proposal_generated",
+        "message": "Generated Commercial Proposal PDF"
     }).execute()
     
     return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=proposal_{client.get('client_alias')}.pdf"})
