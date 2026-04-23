@@ -2957,85 +2957,96 @@ def generate_proposal_pdf(request: Request, client_id: str, tenant: Tenant):
         raise HTTPException(status_code=404, detail="Client not found or access denied")
 
     client = res.data[0]
-    
+
+    OPP_TYPE_ES = {
+        "battery_upgrade": "Actualizacion de Bateria",
+        "industrial_battery": "Bateria Industrial",
+        "system_expansion": "Ampliacion del Sistema",
+        "inverter_replacement": "Sustitucion de Inversor",
+        "ev_charger": "Cargador de Vehiculo Electrico",
+        "maintenance": "Mantenimiento",
+    }
+    LOCATION_ES = {
+        "residential": "Residencial",
+        "commercial": "Comercial",
+        "industrial": "Industrial",
+    }
+    opp_raw = (client.get("opportunity_type") or "").lower()
+    opp_label = OPP_TYPE_ES.get(opp_raw, client.get("opportunity_type_display") or opp_raw.replace("_", " ").title())
+    loc_raw = (client.get("location_type") or "").lower()
+    loc_label = LOCATION_ES.get(loc_raw, str(client.get("location_type") or "N/D").capitalize())
+    fecha_hoy = date.today().strftime("%d/%m/%Y")
+
     # Generate Commercial Proposal PDF
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
-    
-    # ─── Page Background ───────────────────────────────────────────
+
+    # ─── Fondo ─────────────────────────────────────────────────────
     pdf.set_fill_color(10, 14, 40)
     pdf.rect(0, 0, 210, 297, "F")
-    
-    # ─── Title ─────────────────────────────────────────────────────
-    pdf.set_font("Helvetica", "B", 26)
+
+    # ─── Título ────────────────────────────────────────────────────
+    pdf.set_font("Helvetica", "B", 22)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(0, 20, "Battery Upgrade Opportunity", ln=True, align="C")
-    
-    # ─── Client Info ───────────────────────────────────────────────
+    pdf.cell(0, 18, "Propuesta de Oportunidad Solar", ln=True, align="C")
     pdf.set_font("Helvetica", "", 14)
     pdf.set_text_color(180, 190, 255)
-    pdf.cell(0, 10, f"Client: {client.get('client_alias')}", ln=True, align="C")
+    pdf.cell(0, 10, client.get("client_alias") or "", ln=True, align="C")
     pdf.ln(10)
-    
-    # ─── 1. Opportunity Detected ───────────────────────────────────
-    pdf.set_font("Helvetica", "B", 16)
+
+    # ─── 1. Oportunidad detectada ──────────────────────────────────
+    pdf.set_font("Helvetica", "B", 15)
     pdf.set_text_color(255, 100, 100)
-    pdf.cell(0, 10, "1. Opportunity Detected", ln=True)
+    pdf.cell(0, 10, "1. Oportunidad detectada", ln=True)
     pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(0, 8, f"Opportunity Type: {client.get('opportunity_type')}", ln=True)
-    pdf.cell(0, 8, f"Expected Value: EUR {float(client.get('expected_value') or 0):,.2f}", ln=True)
-    pdf.cell(0, 8, f"Close Probability: {round(float(client.get('close_probability') or 0) * 100)}%", ln=True)
-    pdf.cell(0, 8, f"AI Score: {client.get('score')} pts", ln=True)
+    pdf.cell(0, 8, f"Tipo de oportunidad: {opp_label}", ln=True)
+    pdf.cell(0, 8, f"Valor estimado: EUR {float(client.get('expected_value') or 0):,.2f}", ln=True)
+    pdf.cell(0, 8, f"Probabilidad de cierre: {round(float(client.get('close_probability') or 0) * 100)}%", ln=True)
+    pdf.cell(0, 8, f"Puntuacion IA: {client.get('score') or 'N/D'} pts", ln=True)
     pdf.ln(8)
-    
-    # ─── 2. Battery Analysis ───────────────────────────────────────
-    pdf.set_font("Helvetica", "B", 16)
+
+    # ─── 2. Analisis de bateria ────────────────────────────────────
+    pdf.set_font("Helvetica", "B", 15)
     pdf.set_text_color(100, 255, 150)
-    pdf.cell(0, 10, "2. Battery Analysis", ln=True)
+    pdf.cell(0, 10, "2. Analisis de bateria", ln=True)
     pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(220, 220, 220)
-    
-    export_kwh = client.get("estimated_annual_export_kwh", 0) or 0
-    savings = client.get("estimated_battery_savings", 0) or 0
-    payback = client.get("battery_payback_years", 0) or 0
-    batt_score = client.get("battery_opportunity_score", 0) or 0
-    
-    pdf.cell(0, 8, f"Estimated Annual Export: {round(export_kwh):,} kWh/year", ln=True)
-    pdf.cell(0, 8, f"Potential Battery Savings: EUR {round(savings):,}/year", ln=True)
-    pdf.cell(0, 8, f"Estimated Payback Period: {payback} years", ln=True)
-    pdf.cell(0, 8, f"Battery Opportunity Score: {batt_score}/100", ln=True)
+    export_kwh = float(client.get("estimated_annual_export_kwh") or 0)
+    savings = float(client.get("estimated_battery_savings") or 0)
+    payback = client.get("battery_payback_years") or "N/D"
+    batt_score = client.get("battery_opportunity_score") or "N/D"
+    pdf.cell(0, 8, f"Exportacion anual estimada: {round(export_kwh):,} kWh/ano", ln=True)
+    pdf.cell(0, 8, f"Ahorro potencial con bateria: EUR {round(savings):,}/ano", ln=True)
+    pdf.cell(0, 8, f"Periodo de retorno estimado: {payback} anos", ln=True)
+    pdf.cell(0, 8, f"Puntuacion oportunidad bateria: {batt_score}/100", ln=True)
     pdf.ln(8)
-    
-    # ─── 3. System Information ─────────────────────────────────────
-    pdf.set_font("Helvetica", "B", 16)
+
+    # ─── 3. Informacion del sistema ────────────────────────────────
+    pdf.set_font("Helvetica", "B", 15)
     pdf.set_text_color(100, 180, 255)
-    pdf.cell(0, 10, "3. System Information", ln=True)
+    pdf.cell(0, 10, "3. Informacion del sistema", ln=True)
     pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(220, 220, 220)
-    pdf.cell(0, 8, f"System Size: {client.get('system_size_kwp') or 'N/A'} kWp", ln=True)
-    pdf.cell(0, 8, f"Installation Year: {client.get('installation_year') or 'N/A'}", ln=True)
-    pdf.cell(0, 8, f"Location Type: {str(client.get('location_type') or 'N/A').capitalize()}", ln=True)
+    pdf.cell(0, 8, f"Potencia instalada: {client.get('system_size_kwp') or 'N/D'} kWp", ln=True)
+    pdf.cell(0, 8, f"Ano de instalacion: {client.get('installation_year') or 'N/D'}", ln=True)
+    pdf.cell(0, 8, f"Tipo de consumo: {loc_label}", ln=True)
     pdf.ln(8)
-    
-    # ─── 4. Opportunity Explanation ────────────────────────────────
-    sales_script = client.get("sales_script_long") or ""
-    if sales_script:
-        pdf.set_font("Helvetica", "B", 16)
-        pdf.set_text_color(255, 200, 100)
-        pdf.cell(0, 10, "4. Opportunity Explanation", ln=True)
-        pdf.set_font("Helvetica", "", 11)
-        pdf.set_text_color(220, 220, 220)
-        # Replace newlines and euro signs for fpdf compatibility
-        clean_script = sales_script.replace("\n\n", "\n").replace("\u20ac", "EUR ").strip()
-        pdf.multi_cell(0, 7, clean_script)
-    
-    # ─── Footer ────────────────────────────────────────────────────
-    pdf.ln(20)
+
+    # ─── 4. Proximos pasos ─────────────────────────────────────────
+    pdf.set_font("Helvetica", "B", 15)
+    pdf.set_text_color(255, 200, 100)
+    pdf.cell(0, 10, "4. Proximos pasos", ln=True)
+    pdf.set_font("Helvetica", "", 12)
+    pdf.set_text_color(220, 220, 220)
+    pdf.multi_cell(0, 8, "Contacte con su instalador para activar esta oportunidad.")
+    pdf.ln(15)
+
+    # ─── Pie de pagina ─────────────────────────────────────────────
     pdf.set_font("Helvetica", "I", 10)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 10, f"Proposal generated by Solvist Intelligence Engine. (ID: {client_id})", align="C")
+    pdf.cell(0, 10, f"Generado por Solvist · {fecha_hoy}", align="C")
     
     pdf_bytes = bytes(pdf.output())
     
