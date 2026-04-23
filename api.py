@@ -2985,8 +2985,8 @@ def generate_proposal_pdf(request: Request, client_id: str, tenant: Tenant):
     pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(255, 255, 255)
     pdf.cell(0, 8, f"Opportunity Type: {client.get('opportunity_type')}", ln=True)
-    pdf.cell(0, 8, f"Expected Value: EUR {client.get('expected_value', 0):,.2f}", ln=True)
-    pdf.cell(0, 8, f"Close Probability: {round(client.get('close_probability', 0) * 100)}%", ln=True)
+    pdf.cell(0, 8, f"Expected Value: EUR {float(client.get('expected_value') or 0):,.2f}", ln=True)
+    pdf.cell(0, 8, f"Close Probability: {round(float(client.get('close_probability') or 0) * 100)}%", ln=True)
     pdf.cell(0, 8, f"AI Score: {client.get('score')} pts", ln=True)
     pdf.ln(8)
     
