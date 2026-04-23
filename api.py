@@ -3040,7 +3040,7 @@ def generate_proposal_pdf(request: Request, client_id: str, tenant: Tenant):
     pdf_bytes = bytes(pdf.output())
     
     # ─── Record Event ──────────────────────────────────────────────
-    db.table("opportunity_events").insert({
+    db.table("opportunity_alerts").insert({
         "client_id": client_id,
         "company_id": tenant.company_id,
         "event_type": "proposal_generated",
