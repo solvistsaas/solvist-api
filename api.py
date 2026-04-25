@@ -2736,7 +2736,8 @@ def dashboard(request: Request, tenant: AuthTenant):
 
         formatted_top = []
         for row in (top_res.data or []):
-            client_name = f"PV-{str(row.get('installation_id', ''))[:8].upper()}" if row.get("installation_id") else "Cliente"
+            alias = f"PV-{str(row.get('installation_id', ''))[:8].upper()}" if row.get("installation_id") else "Cliente"
+            client_name = row.get("client_name") or alias or "Cliente"
             formatted_top.append({
                 "client_name": client_name,
                 "total_score": row["total_score"],
@@ -2799,7 +2800,7 @@ def activation_list(request: Request, tenant: Tenant, limit: int = 20, offset: i
             output.append({
                 "score_id": row.get("id"),
                 "installation_id": row.get("installation_id"),
-                "client_name": alias or "Cliente",
+                "client_name": row.get("client_name") or alias or "Cliente",
                 "location_type": inst.get("location_type"),
                 "installation_year": inst.get("installation_year"),
                 "total_score": row.get("total_score"),
