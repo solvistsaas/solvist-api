@@ -3010,7 +3010,7 @@ def generate_proposal_pdf(request: Request, client_id: str, tenant: Tenant):
     # Subtítulo de marca
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(136, 146, 164)
-    pdf.cell(0, 6, "AI STRATEGIC INTELLIGENCE  \u00b7  PUERTO RICO", align="C", ln=True)
+    pdf.cell(0, 6, "Inteligencia Comercial Solar", align="C", ln=True)
     pdf.ln(6)
 
     # ─── Título propuesta ──────────────────────────────────────────
@@ -3022,7 +3022,7 @@ def generate_proposal_pdf(request: Request, client_id: str, tenant: Tenant):
     pdf.cell(0, 8, "Propuesta personalizada", ln=True, align="C")
     pdf.set_font("Helvetica", "", 11)
     pdf.set_text_color(200, 210, 255)
-    pdf.cell(0, 7, client.get("client_alias") or "", ln=True, align="C")
+    pdf.cell(0, 7, client.get("client_name") or client.get("client_alias") or "", ln=True, align="C")
     pdf.ln(8)
 
     # ─── Recuadro ahorro destacado ─────────────────────────────────
