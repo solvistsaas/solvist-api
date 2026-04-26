@@ -1018,6 +1018,7 @@ def core_score_all_installations():
                         client = {
                             "company_id": inst_company_id,
                             "client_alias": client_alias,
+                            "client_name": inst.get("client_name") or None,
                             "anonymous_client": True,
                             "system_size_kwp": float(inst_kwp or 0),
                             "installation_year": inst_year,
