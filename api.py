@@ -3502,7 +3502,7 @@ def opportunities(request: Request, tenant: AuthTenant, limit: int = 100):
         safe_limit = max(1, min(limit, 500))
         res = (
             db.table("clients")
-            .select("id, client_alias, opportunity_type, expected_value, score, priority_score, status")
+            .select("id, client_alias, client_name, opportunity_type, expected_value, score, priority_score, status")
             .eq("company_id", tenant.company_id)
             .gte("score", 40)
             .order("priority_score", desc=True)
