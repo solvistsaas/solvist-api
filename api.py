@@ -1970,6 +1970,7 @@ def _parse_installations_from_dataframe(
             year = None
 
         alias_col = mapping.get("client_alias")
+        client_name_col = mapping.get("client_name")
         location_col = mapping.get("location_type")
         battery_col = mapping.get("has_battery")
         tariff_col = mapping.get("tariff_type")
@@ -2004,6 +2005,7 @@ def _parse_installations_from_dataframe(
                 "installation_year": int(year) if year else None,  # Will use default in scoring engine
                 "country": country_value,
                 "city": str(row[city_col]).strip() if city_col and pd.notna(row.get(city_col)) else None,
+                "client_name": str(row[client_name_col]).strip() if client_name_col and pd.notna(row.get(client_name_col)) else None,
                 "source": "csv_import",
                 "raw_payload": {
                     "company_id": company_id,
