@@ -2442,6 +2442,20 @@ async def import_installations(
             "tenant_id": company_id,
         })
 
+        # Record import log with company_id and user_id
+        try:
+            db.table("import_logs").insert({
+                "file_name": file.filename,
+                "status": "success",
+                "error_message": None,
+                "rows_processed": len(insert_payload),
+                "rows_failed": 0,
+                "company_id": company_id,
+                "user_id": current_user.id,
+            }).execute()
+        except Exception as log_error:
+            logger.warning("IMPORT: Failed to record import_logs for company_id=%s user_id=%s error=%s", company_id, current_user.id, log_error)
+
         return success_response({
             "success": True,
             "rows_processed": row_count if row_count else len(insert_payload),
@@ -2454,6 +2468,21 @@ async def import_installations(
         print("IMPORT ERROR:", str(e))
         traceback.print_exc()
         logger.exception("IMPORT FAILED: %s", str(e))
+
+        # Record failed import log with company_id and user_id
+        try:
+            db.table("import_logs").insert({
+                "file_name": file.filename if file else "unknown",
+                "status": "failed",
+                "error_message": str(e),
+                "rows_processed": row_count,
+                "rows_failed": row_count,
+                "company_id": company_id,
+                "user_id": current_user.id,
+            }).execute()
+        except Exception as log_error:
+            logger.warning("IMPORT: Failed to record import_logs error for company_id=%s user_id=%s error=%s", company_id, current_user.id, log_error)
+
         return JSONResponse(
             status_code=500,
             content={
@@ -3503,7 +3532,7 @@ def opportunities(request: Request, tenant: AuthTenant, limit: int = 100):
         safe_limit = max(1, min(limit, 500))
         res = (
             db.table("clients")
-            .select("id, client_alias, client_name, opportunity_type, expected_value, score, priority_score, status")
+            .select("id, client_alias, client_name, opportunity_type, expected_value, score, priority_score, status, system_size_kwp, installation_year, location_type")
             .eq("company_id", tenant.company_id)
             .gte("score", 40)
             .order("priority_score", desc=True)
