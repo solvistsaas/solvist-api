@@ -3566,6 +3566,23 @@ def opportunities(request: Request, tenant: AuthTenant, limit: int = 100):
         return error_response(str(e))
 
 
+@app.get("/api/import-history")
+@limiter.limit("20/minute")
+def import_history(request: Request, tenant: AuthTenant):
+    try:
+        db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
+        res = (
+            db.table("import_logs")
+            .select("id, file_name, status, rows_processed, rows_failed, created_at")
+            .eq("company_id", tenant.company_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return success_response(res.data or [])
+    except Exception as e:
+        return error_response(str(e))
+
+
 @app.get("/api/revenue-recovery")
 @limiter.limit("20/minute")
 def revenue_recovery(request: Request, tenant: Tenant):
