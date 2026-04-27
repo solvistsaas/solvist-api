@@ -1602,11 +1602,10 @@ PORTFOLIO_SCAN_REQUIRED_COLUMNS_MESSAGE = (
 )
 
 
-REQUIRED_CANONICAL_FIELDS = ("system_size_kwp",)  # Only kwp is strictly required
 DEFAULT_INSTALLATION_YEAR = None  # Will use current year - 5 if missing
 
-# Canonical CSV schema aliases. First matching column is selected.
-CANONICAL_COLUMN_ALIASES: Dict[str, List[str]] = {
+# Obligatory columns - CSV must contain at least one alias for each
+OBLIGATORY_COLUMN_ALIASES: Dict[str, List[str]] = {
     "system_size_kwp": [
         "system_size_kwp",
         "kwp",
@@ -1624,17 +1623,22 @@ CANONICAL_COLUMN_ALIASES: Dict[str, List[str]] = {
         "commission_year",
         "installationdate",
     ],
+    "client_name": ["client_name", "name", "customer", "client"],
+    "location_type": ["location_type", "client_type", "type", "sector"],
+    "has_battery": ["has_battery", "battery", "battery_installed", "with_battery"],
+}
+
+# Optional columns - can be missing without error
+OPTIONAL_COLUMN_ALIASES: Dict[str, List[str]] = {
     "country": ["country", "region", "location", "country_code"],
     "city": ["city", "ciudad", "municipality", "town"],
-    "has_battery": ["has_battery", "battery", "battery_installed", "with_battery"],
     "inverter_model": ["inverter_model", "inverter_brand", "inverter", "inverter_model_name"],
-    "location_type": ["location_type", "client_type", "type", "sector"],
-    "client_name": ["client_name", "name", "customer", "client"],
     "client_alias": ["client_alias", "alias", "client_id"],
     "tariff_type": ["tariff_type", "tariff", "rate_type"],
     "estimated_consumption": ["estimated_consumption", "consumption_kwh", "annual_consumption", "consumption"],
     "dc_ac_ratio": ["dc_ac_ratio", "dcac_ratio", "dcac"],
     "has_maintenance_contract": ["has_maintenance_contract", "maintenance_contract", "with_maintenance"],
+    "opportunity_type": ["opportunity_type", "opp_type", "opportunity"],
 }
 
 
@@ -1743,11 +1747,19 @@ def _looks_like_single_column_csv(df: pd.DataFrame) -> bool:
 
 
 def _resolve_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
+    """
+    Map CSV columns to canonical field names.
+    Validates that all obligatory columns are present.
+    Raises HTTPException with list of missing obligatory columns if validation fails.
+    """
     mapping: Dict[str, str] = {}
     detected_columns = list(df.columns)
     logger.info("CSV columns detected: %s", detected_columns)
 
-    for canonical, aliases in CANONICAL_COLUMN_ALIASES.items():
+    missing_obligatory: List[str] = []
+
+    # Process obligatory columns
+    for canonical, aliases in OBLIGATORY_COLUMN_ALIASES.items():
         source_column: Optional[str] = None
         for alias in aliases:
             normalized_alias = _normalize_column_name(alias)
@@ -1757,10 +1769,34 @@ def _resolve_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
         if source_column:
             mapping[canonical] = source_column
             logger.info("Mapped %s -> %s", canonical, source_column)
+        else:
+            missing_obligatory.append(canonical)
+            logger.warning("Missing obligatory column: %s", canonical)
 
-    for required_field in REQUIRED_CANONICAL_FIELDS:
-        if required_field not in mapping:
-            logger.warning("Missing %s", required_field)
+    # Validate obligatory columns
+    if missing_obligatory:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "CSV incompleto. Faltan columnas: " + ", ".join(missing_obligatory),
+                "missing_columns": missing_obligatory,
+                "columns_detected": list(df.columns),
+            },
+        )
+
+    # Process optional columns - don't error if missing
+    for canonical, aliases in OPTIONAL_COLUMN_ALIASES.items():
+        source_column: Optional[str] = None
+        for alias in aliases:
+            normalized_alias = _normalize_column_name(alias)
+            if normalized_alias in df.columns:
+                source_column = normalized_alias
+                break
+        if source_column:
+            mapping[canonical] = source_column
+            logger.info("Mapped %s -> %s", canonical, source_column)
+        else:
+            logger.debug("Optional column not found: %s", canonical)
 
     return mapping
 
@@ -1920,25 +1956,6 @@ def _parse_installations_from_dataframe(
     # Debug: log detected columns
     logger.info(f"CSV detected columns: {list(df.columns)}")
     logger.info(f"Column mapping: {mapping}")
-
-    # Only system_size_kwp is strictly required
-    if "system_size_kwp" not in mapping:
-        if required_columns_error_message:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "Missing required column: kwp (system_size_kwp)",
-                    "message": required_columns_error_message,
-                    "columns_detected": list(df.columns),
-                },
-            )
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "Missing required column: kwp (system_size_kwp)",
-                "columns_detected": list(df.columns),
-            },
-        )
 
     insert_payload: List[Dict] = []
     for row_pos, (_, row) in enumerate(df.iterrows()):
