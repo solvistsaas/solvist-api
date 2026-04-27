@@ -2464,7 +2464,7 @@ async def import_installations(
         # Record import log with company_id and user_id
         print(f"DEBUG import_logs: company_id={company_id}, user_id={current_user.id}, file={file.filename}")
         try:
-            result = db.table("import_logs").insert({
+            result = admin_client.table("import_logs").insert({
                 "file_name": file.filename,
                 "status": "success",
                 "error_message": None,
@@ -2493,7 +2493,7 @@ async def import_installations(
 
         # Record failed import log with company_id and user_id
         try:
-            db.table("import_logs").insert({
+            admin_client.table("import_logs").insert({
                 "file_name": file.filename if file else "unknown",
                 "status": "failed",
                 "error_message": str(e),
