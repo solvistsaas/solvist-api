@@ -2462,7 +2462,6 @@ async def import_installations(
         })
 
         # Record import log with company_id and user_id
-        print(f"DEBUG import_logs: company_id={company_id}, user_id={current_user.id}, file={file.filename}")
         try:
             result = admin_client.table("import_logs").insert({
                 "file_name": file.filename,
@@ -2473,9 +2472,7 @@ async def import_installations(
                 "company_id": company_id,
                 "user_id": current_user.id,
             }).execute()
-            print(f"DEBUG import_logs result: {result}")
         except Exception as log_error:
-            print(f"DEBUG import_logs ERROR: {log_error}")
             logger.warning("IMPORT: Failed to record import_logs for company_id=%s user_id=%s error=%s", company_id, current_user.id, log_error)
 
         return success_response({
