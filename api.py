@@ -2421,9 +2421,11 @@ async def import_installations(
                 status_code=500,
                 detail="Invalid installation payload: missing company_id",
             )
+        # Upsert by (client_name, company_id) to avoid duplicates on reimport
+        # NOTE: Requires unique constraint on (client_name, company_id) in installations table
         for chunk in [insert_payload[i:i + 100] for i in range(0, len(insert_payload), 100)]:
-            db.table("installations").upsert(chunk, on_conflict="id").execute()
-        logger.info("IMPORT: Inserted %s installations for company_id=%s", len(insert_payload), company_id)
+            db.table("installations").upsert(chunk, on_conflict="client_name,company_id").execute()
+        logger.info("IMPORT: Upserted %s installations for company_id=%s", len(insert_payload), company_id)
         print("ROWS INSERTED:", len(insert_payload))
         print("DB INSERT CHECK", {
             "rows_inserted": len(insert_payload),
