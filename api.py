@@ -4141,6 +4141,72 @@ def request_portal_proposal(request: Request, token: str):
     return success_response({"success": True})
 
 
+class PortalSurveyPayload(BaseModel):
+    answers: dict
+
+
+@app.post("/api/public/portal/{token}/survey")
+@limiter.limit("5/minute")
+def submit_portal_survey(request: Request, token: str, payload: PortalSurveyPayload):
+    res_client = (
+        admin_client.table("clients")
+        .select("id, company_id, opportunity_type")
+        .eq("portal_token", token)
+        .single()
+        .execute()
+    )
+
+    if not res_client.data:
+        raise HTTPException(status_code=404, detail="Portal not found or inactive")
+
+    client_data = res_client.data
+
+    # Save survey answers
+    try:
+        admin_client.table("portal_responses").insert({
+            "token": token,
+            "client_id": client_data["id"],
+            "answers": payload.answers,
+        }).execute()
+    except Exception as e:
+        logger.warning("Failed to save portal survey response: %s", str(e))
+
+    # Create portal lead if not already created in last 24h
+    threshold_date = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    existing_lead = (
+        admin_client.table("portal_leads")
+        .select("id")
+        .eq("client_id", client_data["id"])
+        .gt("requested_at", threshold_date)
+        .limit(1)
+        .execute()
+    )
+
+    if not existing_lead.data:
+        try:
+            admin_client.table("portal_leads").insert({
+                "client_id": client_data["id"],
+                "portal_token": token,
+                "interest_type": client_data["opportunity_type"],
+                "status": "New",
+            }).execute()
+        except Exception as e:
+            logger.warning("Failed to create portal lead from survey: %s", str(e))
+
+    # Log event
+    try:
+        admin_client.table("portal_events").insert({
+            "client_id": client_data["id"],
+            "company_id": client_data["company_id"],
+            "event_type": "survey_submitted",
+            "event_metadata": {"ip": request.client.host if request.client else "unknown"},
+        }).execute()
+    except Exception as e:
+        logger.warning("Failed to log survey_submitted event: %s", str(e))
+
+    return success_response({"success": True})
+
+
 # ─── Endpoints: System Diagnostics & Health (BLOCK R5) ────────────────────────
 
 @app.get("/health")
