@@ -4186,6 +4186,7 @@ def submit_portal_survey(request: Request, token: str, payload: PortalSurveyPayl
         try:
             admin_client.table("portal_leads").insert({
                 "client_id": client_data["id"],
+                "company_id": client_data["company_id"],
                 "portal_token": token,
                 "interest_type": client_data["opportunity_type"],
                 "status": "New",
