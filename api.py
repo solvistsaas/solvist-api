@@ -3964,10 +3964,11 @@ def log_sales_action(request: Request, client_id: str, payload: SalesActionPaylo
 @limiter.limit("10/minute")
 def enable_client_portal(request: Request, client_id: str, tenant: Tenant):
     db = scoped_client(tenant.jwt)
+    portal_token = str(uuid.uuid4())
 
     res = (
         db.table("clients")
-        .update({"portal_enabled": True, "portal_invited": True})
+        .update({"portal_enabled": True, "portal_invited": True, "portal_token": portal_token})
         .eq("id", client_id)
         .eq("company_id", tenant.company_id)
         .execute()
@@ -3976,7 +3977,7 @@ def enable_client_portal(request: Request, client_id: str, tenant: Tenant):
     if not res.data:
         raise HTTPException(status_code=404, detail="Client not found or update failed")
 
-    return success_response({"portal_url": f"/portal/{client_id}"})
+    return success_response({"portal_url": f"/portal/{portal_token}"})
 
 
 @app.post("/api/client/{client_id}/send-portal")
