@@ -1120,6 +1120,24 @@ def core_score_all_installations():
 
                         print("CLIENTS AFTER DEDUP:", len(clients_payload))
                         print("INSERTING CLIENTS:", len(clients_payload))
+
+                        # Fetch existing clients to preserve their status, assigned_to, and notes
+                        existing_clients_res = admin_client.table("clients").select("company_id,client_alias,status,assigned_to,notes").eq("company_id", company_id).execute()
+                        existing_clients_map = {
+                            (str(c.get("company_id", "")).strip().lower(), str(c.get("client_alias", "")).strip().lower()): c
+                            for c in (existing_clients_res.data or [])
+                        }
+
+                        # Preserve status, assigned_to, and notes for existing clients
+                        for c in clients_payload:
+                            key = (str(c.get("company_id", "")).strip().lower(), str(c.get("client_alias", "")).strip().lower())
+                            if key in existing_clients_map:
+                                existing = existing_clients_map[key]
+                                # Preserve user-controlled fields on update
+                                c["status"] = existing.get("status", c.get("status", "New"))
+                                c["assigned_to"] = existing.get("assigned_to")
+                                c["notes"] = existing.get("notes")
+
                         clients_upsert_res = admin_client.table("clients").upsert(
                             clients_payload,
                             on_conflict="company_id,client_alias"
