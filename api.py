@@ -76,6 +76,7 @@ from config import (
 import resend
 import stripe
 import psycopg2
+import anthropic as anthropic_sdk
 from db import get_db_connection
 
 def verify_supabase_token(token: str) -> dict:
@@ -4325,6 +4326,65 @@ def system_check(request: Request):
 
 class OnboardingRequest(BaseModel):
     company_name: str = "Mi Empresa Solar"
+
+
+# ─── AI Draft ────────────────────────────────────────────────────────────────
+
+class AIDraftRequest(BaseModel):
+    clientName: str
+    opportunityType: str
+    estimatedValue: Optional[float] = None
+    score: Optional[float] = None
+    installationYear: Optional[int] = None
+    channel: str  # "whatsapp" | "email"
+    tone: str = "Amigable"  # "Formal" | "Amigable" | "Casual"
+
+
+@app.post("/api/public/draft")
+@limiter.limit("20/minute")
+async def generate_ai_draft(request: Request, payload: AIDraftRequest):
+    """Generate a short AI sales message for a client via Claude."""
+    try:
+        max_chars = 160 if payload.channel.lower() == "whatsapp" else 500
+        channel_label = "WhatsApp" if payload.channel.lower() == "whatsapp" else "Email"
+        emoji_hint = " Puedes incluir 1-2 emojis relevantes." if payload.channel.lower() == "whatsapp" else ""
+
+        value_text = f"{int(payload.estimatedValue):,}€" if payload.estimatedValue else "un valor significativo"
+        year_text = f"instalada en {payload.installationYear}" if payload.installationYear else ""
+        score_text = f" (prioridad {int(payload.score)}/100)" if payload.score is not None else ""
+
+        prompt = (
+            f"Genera un mensaje corto de {channel_label} para el cliente '{payload.clientName}' "
+            f"sobre la oportunidad: {payload.opportunityType}{score_text}. "
+            f"Instalación solar {year_text}. Ahorro o valor estimado: {value_text}. "
+            f"Tono: {payload.tone}.{emoji_hint} "
+            f"Máximo {max_chars} caracteres. Solo el mensaje, sin explicaciones ni comillas."
+        )
+
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        if not anthropic_key:
+            raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
+
+        client_ai = anthropic_sdk.Anthropic(api_key=anthropic_key)
+        message = client_ai.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=256,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        draft_text = message.content[0].text.strip()
+        # Enforce character limit
+        if len(draft_text) > max_chars:
+            draft_text = draft_text[:max_chars].rsplit(" ", 1)[0]
+
+        return {"draft": draft_text}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("AI draft generation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Error generating AI draft")
+
 
 @app.post("/api/auth/onboarding")
 async def onboarding(
