@@ -4380,6 +4380,8 @@ async def generate_ai_draft(request: Request, payload: AIDraftRequest):
             f"   - Mantenimiento/optimización inversor: instalaciones +4 años sin revisión pierden hasta un 25% de rendimiento\n"
             f"   - EV/cargador: con la penetración actual del vehículo eléctrico, el punto de carga se amortiza en menos de 3 años\n"
             f"5. CTA: propuesta concreta de bajo compromiso (15 minutos, una llamada, una pregunta directa)\n\n"
+            f"CRÍTICO: El mensaje debe terminar con una frase completa. Nunca cortes una oración a mitad. Si el límite de caracteres no permite completar la frase, acorta el argumento central pero termina siempre con el CTA completo.\n\n"
+            f"CRÍTICO: Nunca uses 'vuestra' ni 'vuestro'. En tono Casual y Amigable usa 'tu/tus'. En tono Formal usa 'su/sus'.\n\n"
             f"Genera SOLO el mensaje. Sin explicaciones ni comillas."
         )
 
