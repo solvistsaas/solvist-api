@@ -4350,15 +4350,37 @@ async def generate_ai_draft(request: Request, payload: AIDraftRequest):
         emoji_hint = " Puedes incluir 1-2 emojis relevantes." if payload.channel.lower() == "whatsapp" else ""
 
         value_text = f"{int(payload.estimatedValue):,}€" if payload.estimatedValue else "un valor significativo"
-        year_text = f"instalada en {payload.installationYear}" if payload.installationYear else ""
-        score_text = f" (prioridad {int(payload.score)}/100)" if payload.score is not None else ""
+        year_text = f"instalada en {payload.installationYear}" if payload.installationYear else "no especificado"
+        score_text = f"{int(payload.score)}" if payload.score is not None else ""
 
-        prompt = (
-            f"Genera un mensaje corto de {channel_label} para el cliente '{payload.clientName}' "
-            f"sobre la oportunidad: {payload.opportunityType}{score_text}. "
-            f"Instalación solar {year_text}. Ahorro o valor estimado: {value_text}. "
-            f"Tono: {payload.tone}.{emoji_hint} "
-            f"Máximo {max_chars} caracteres. Solo el mensaje, sin explicaciones ni comillas."
+        system_prompt = "Eres el asistente comercial de una empresa instaladora solar fotovoltaica española. Tu misión es redactar mensajes de venta cortos, personalizados y persuasivos dirigidos a clientes con instalaciones solares ya realizadas. Generas SOLO el mensaje final. Sin explicaciones, sin títulos, sin comillas."
+
+        user_prompt = (
+            f"Redacta un mensaje de {channel_label} para contactar al cliente '{payload.clientName}'.\n\n"
+            f"DATOS DE LA INSTALACIÓN Y OPORTUNIDAD:\n"
+            f"- Año de instalación: {year_text}\n"
+            f"- Tipo de oportunidad detectada: {payload.opportunityType}\n"
+            f"- Valor económico estimado: {value_text}\n"
+            f"- Score de oportunidad: {score_text}/100 (cuanto más alto, más urgente)\n"
+            f"- Tono: {payload.tone}\n"
+            f"- Canal: {channel_label} → máximo {max_chars} caracteres\n\n"
+            f"REGLAS DE FORMATO:\n"
+            f"- WhatsApp: máximo 160 caracteres, directo, puede incluir 1 emoji si el tono no es Formal\n"
+            f"- Email: máximo 500 caracteres, estructura clara, sin emojis en tono Formal\n"
+            f"- Formal: usar 'usted', lenguaje profesional, sin emojis\n"
+            f"- Amigable: usar 'tú', cercano pero con datos concretos, 1 emoji máximo en WhatsApp\n"
+            f"- Casual: directo, informal, pero siempre con el dato económico\n\n"
+            f"ESTRUCTURA OBLIGATORIA (adaptada al canal):\n"
+            f"1. Apertura: referencia directa a SU instalación (año si disponible) — demuestra que no es un mensaje masivo\n"
+            f"2. El hallazgo: qué hemos detectado y por qué es relevante ahora\n"
+            f"3. El número: valor económico estimado en €, siempre presente y concreto\n"
+            f"4. La lógica: una razón de por qué tiene sentido actuar ahora (elige la más relevante según el tipo de oportunidad):\n"
+            f"   - Batería: el precio de baterías LFP ha bajado un 45% desde 2020, payback actual 6-9 años\n"
+            f"   - Ampliación paneles: cada mes sin optimizar es producción perdida que no se recupera\n"
+            f"   - Mantenimiento/optimización inversor: instalaciones +4 años sin revisión pierden hasta un 25% de rendimiento\n"
+            f"   - EV/cargador: con la penetración actual del vehículo eléctrico, el punto de carga se amortiza en menos de 3 años\n"
+            f"5. CTA: propuesta concreta de bajo compromiso (15 minutos, una llamada, una pregunta directa)\n\n"
+            f"Genera SOLO el mensaje. Sin explicaciones ni comillas."
         )
 
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
@@ -4369,7 +4391,8 @@ async def generate_ai_draft(request: Request, payload: AIDraftRequest):
         message = client_ai.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=256,
-            messages=[{"role": "user", "content": prompt}],
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
         )
 
         draft_text = message.content[0].text.strip()
