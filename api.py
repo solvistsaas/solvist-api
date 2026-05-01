@@ -3709,7 +3709,7 @@ def get_portal_leads(request: Request, tenant: Tenant):
         try:
             res = (
                 db.table("portal_leads")
-                .select("id, interest_type, requested_at, status, clients!inner(client_alias, company_id)")
+                .select("id, interest_type, requested_at, status, clients!inner(client_alias, client_name, company_id)")
                 .eq("clients.company_id", company_id)
                 .order("requested_at", desc=True)
                 .limit(10)
@@ -3720,8 +3720,10 @@ def get_portal_leads(request: Request, tenant: Tenant):
             for lead in rows:
                 client_data = lead.get("clients", {}) or {}
                 status_raw = lead.get("status")
+                client_name = client_data.get("client_name") or client_data.get("client_alias") or "Cliente"
                 leads.append({
                     "id": lead.get("id"),
+                    "client_name": client_name,
                     "client_alias": client_data.get("client_alias", "Cliente"),
                     "interest_type": lead.get("interest_type"),
                     "requested_at": lead.get("requested_at"),
@@ -3734,21 +3736,26 @@ def get_portal_leads(request: Request, tenant: Tenant):
             try:
                 res = (
                     db.table("portal_leads")
-                    .select("id, interest_type, requested_at, status")
-                    .eq("company_id", company_id)
+                    .select("id, interest_type, requested_at, status, clients!inner(client_alias, client_name)")
+                    .eq("clients.company_id", company_id)
                     .order("requested_at", desc=True)
                     .limit(10)
                     .execute()
                 )
                 rows = res.data or []
-                leads = [{
-                    "id": lead.get("id"),
-                    "client_alias": "Cliente",
-                    "interest_type": lead.get("interest_type"),
-                    "requested_at": lead.get("requested_at"),
-                    "status": lead.get("status"),
-                    "status_display": "Nuevo lead desde portal" if lead.get("status") == "New" else lead.get("status"),
-                } for lead in rows]
+                leads = []
+                for lead in rows:
+                    client_data = lead.get("clients", {}) or {}
+                    client_name = client_data.get("client_name") or client_data.get("client_alias") or "Cliente"
+                    leads.append({
+                        "id": lead.get("id"),
+                        "client_name": client_name,
+                        "client_alias": client_data.get("client_alias", "Cliente"),
+                        "interest_type": lead.get("interest_type"),
+                        "requested_at": lead.get("requested_at"),
+                        "status": lead.get("status"),
+                        "status_display": "Nuevo lead desde portal" if lead.get("status") == "New" else lead.get("status"),
+                    })
             except Exception:
                 logger.warning(
                     "portal_leads fallback unavailable for company_id=%s; returning empty set",
