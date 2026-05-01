@@ -3709,8 +3709,8 @@ def get_portal_leads(request: Request, tenant: Tenant):
         try:
             res = (
                 db.table("portal_leads")
-                .select("id, interest_type, requested_at, status, clients!inner(client_alias, client_name, company_id)")
-                .eq("clients.company_id", company_id)
+                .select("id, interest_type, requested_at, status, clients(client_alias, client_name)")
+                .eq("company_id", company_id)
                 .order("requested_at", desc=True)
                 .limit(10)
                 .execute()
@@ -3736,8 +3736,8 @@ def get_portal_leads(request: Request, tenant: Tenant):
             try:
                 res = (
                     db.table("portal_leads")
-                    .select("id, interest_type, requested_at, status, clients!inner(client_alias, client_name)")
-                    .eq("clients.company_id", company_id)
+                    .select("id, interest_type, requested_at, status, clients(client_alias, client_name)")
+                    .eq("company_id", company_id)
                     .order("requested_at", desc=True)
                     .limit(10)
                     .execute()
