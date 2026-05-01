@@ -4345,7 +4345,7 @@ class AIDraftRequest(BaseModel):
 async def generate_ai_draft(request: Request, payload: AIDraftRequest):
     """Generate a short AI sales message for a client via Claude."""
     try:
-        max_chars = 160 if payload.channel.lower() == "whatsapp" else 500
+        max_chars = 350 if payload.channel.lower() == "whatsapp" else 500
         channel_label = "WhatsApp" if payload.channel.lower() == "whatsapp" else "Email"
         emoji_hint = " Puedes incluir 1-2 emojis relevantes." if payload.channel.lower() == "whatsapp" else ""
 
