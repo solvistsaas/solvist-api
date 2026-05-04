@@ -79,27 +79,33 @@ def score_installation_age(installation_year: Optional[int], now_year: int) -> T
     return min(score, 65), f"age={age}years"
 
 
-def score_battery(has_battery: Optional[bool], kwp: float, location_type: str) -> Tuple[float, str]:
-    """Score battery opportunity - missing battery = opportunity."""
+def score_battery(has_battery: Optional[bool], kwp: float, location_type: str, installation_year: Optional[int] = None, now_year: int = 2024) -> Tuple[float, str]:
+    """Score battery opportunity - includes industrial logic and age bonus."""
     if has_battery is True:
         return 0.0, "has_battery"
 
-    # No battery or unknown = opportunity
-    score = 40.0  # Base score for missing battery
-
-    # Bonus for larger systems
-    if kwp >= 5:
-        score += min(kwp * 2, 20)
-
-    # Residential bonus (higher self-consumption potential)
-    if location_type == "residential":
-        score += 10
-
-    # Unknown battery status gets partial bonus
     if has_battery is None:
-        score += 15  # Uncertainty bonus
+        return 0.0, "battery_unknown"
 
-    return min(score, 85), f"no_battery+kwp={kwp}"
+    # has_battery is False
+    if location_type == "industrial":
+        score = 90.0 if kwp >= 30 else 70.0
+    else:
+        score = 40.0
+        if kwp >= 5:
+            score += min(kwp * 2, 20)
+        if location_type == "residential":
+            score += 10
+
+    # Age bonus
+    if installation_year is not None:
+        age = now_year - installation_year
+        if age >= 5:
+            score += 15
+        elif age >= 3:
+            score += 8
+
+    return min(score, 100), f"no_battery+kwp={kwp}+loc={location_type}"
 
 
 def score_maintenance(has_maintenance: Optional[bool], installation_year: Optional[int], now_year: int, kwp: float) -> Tuple[float, str]:
@@ -142,24 +148,6 @@ def score_ev_charger(kwp: float, location_type: str) -> Tuple[float, str]:
 
     return min(score, 50), f"kwp={kwp}"
 
-
-def score_industrial(location_type: str, kwp: float, has_battery: Optional[bool]) -> Tuple[float, str]:
-    """Score industrial battery opportunity."""
-    if location_type != "industrial":
-        return 0.0, "not_industrial"
-
-    score = 30.0  # Base for industrial
-
-    if kwp >= 30:
-        score += 20
-    if kwp >= 50:
-        score += 20
-    if has_battery is False:
-        score += 20
-    elif has_battery is None:
-        score += 10  # Uncertainty bonus
-
-    return min(score, 90), "industrial"
 
 
 def score_expansion(kwp: float, estimated_consumption: Optional[float]) -> Tuple[float, str]:
@@ -212,28 +200,20 @@ def score_inverter(installation_year: Optional[int], now_year: int, dc_ac_ratio:
     return min(score, 70), detail_str
 
 
-def calculate_uncertainty_bonus(installation: Dict) -> Tuple[float, List[str]]:
-    """Add bonus points for missing key data - these are opportunities to investigate."""
-    missing_fields = []
-    bonus = 0.0
+def score_warranty(installation_year: Optional[int], now_year: int) -> Tuple[float, str]:
+    """Score warranty opportunity based on system age."""
+    if installation_year is None:
+        return 0.0, "age_unknown"
 
-    if not _has_field(installation, "installation_year"):
-        missing_fields.append("installation_year")
-        bonus += 10
-
-    if not _has_field(installation, "has_battery"):
-        missing_fields.append("has_battery")
-        bonus += 10
-
-    if not _has_field(installation, "has_maintenance_contract"):
-        missing_fields.append("maintenance")
-        bonus += 5
-
-    if not _has_field(installation, "estimated_consumption"):
-        missing_fields.append("consumption")
-        bonus += 5
-
-    return bonus, missing_fields
+    age = now_year - installation_year
+    if age >= 10:
+        return 80.0, f"age={age}"
+    elif age >= 7:
+        return 50.0, f"age={age}"
+    elif age >= 5:
+        return 20.0, f"age={age}"
+    else:
+        return 0.0, f"age={age}"
 
 
 # ─── Monetization: Dynamic Opportunity Value Calculation ──────────────────────
@@ -329,16 +309,17 @@ def estimate_opportunity_value(
     breakdown["ev_charger"] = round(ev_value, 2)
     base_value += ev_value
 
-    # 6. Industrial Battery (for industrial installations)
-    # - Much larger scale, higher value
-    industrial_value = 0.0
-    if location_type == "industrial":
-        if kwp >= 30:
-            industrial_value = kwp * 150  # Industrial battery scale
-            if has_battery is False:
-                industrial_value *= 1.3  # No battery = higher opportunity
-    breakdown["industrial"] = round(industrial_value, 2)
-    base_value += industrial_value
+    # 6. Warranty Opportunity
+    # - Out-of-warranty systems need extended coverage or component replacement
+    warranty_value = 0.0
+    if installation_year is not None:
+        age = now_year - installation_year
+        if age >= 7:
+            warranty_value = 600.0
+        elif age >= 5:
+            warranty_value = 400.0
+    breakdown["warranty"] = round(warranty_value, 2)
+    base_value += warranty_value
 
     # Apply confidence multiplier based on score
     # Higher score = higher confidence = more realistic value
@@ -403,8 +384,10 @@ def compute_opportunity_score(
     # 2. Age-based score
     component_scores["age"], component_details["age"] = score_installation_age(installation_year, now_year)
 
-    # 3. Battery opportunity
-    component_scores["battery"], component_details["battery"] = score_battery(has_battery, kwp, location_type)
+    # 3. Battery opportunity (includes industrial logic)
+    component_scores["battery"], component_details["battery"] = score_battery(
+        has_battery, kwp, location_type, installation_year, now_year
+    )
 
     # 4. Maintenance opportunity
     component_scores["maintenance"], component_details["maintenance"] = score_maintenance(
@@ -414,40 +397,31 @@ def compute_opportunity_score(
     # 5. EV charger opportunity
     component_scores["ev"], component_details["ev"] = score_ev_charger(kwp, location_type)
 
-    # 6. Industrial opportunity
-    component_scores["industrial"], component_details["industrial"] = score_industrial(
-        location_type, kwp, has_battery
-    )
-
-    # 7. Expansion opportunity
+    # 6. Expansion opportunity
     component_scores["expansion"], component_details["expansion"] = score_expansion(kwp, estimated_consumption)
 
-    # 8. Inverter replacement
+    # 7. Inverter replacement
     component_scores["inverter"], component_details["inverter"] = score_inverter(
         installation_year, now_year, dc_ac_ratio
     )
 
-    # 9. Uncertainty bonus for missing data
-    uncertainty_bonus, missing_fields = calculate_uncertainty_bonus(installation)
-    component_scores["uncertainty"] = uncertainty_bonus
-    component_details["uncertainty"] = f"missing:{'+'.join(missing_fields)}" if missing_fields else "complete"
+    # 8. Warranty opportunity
+    component_scores["warranty"], component_details["warranty"] = score_warranty(installation_year, now_year)
 
     # Log component breakdown
     for component, score in component_scores.items():
         logger.debug(f"  {component}: {score:.1f} ({component_details[component]})")
 
-    # Calculate weighted total score
-    # Each component contributes to overall opportunity assessment
+    # Calculate weighted total score (weights sum = 1.00)
     total_raw = (
-        component_scores["size"] * 0.15 +
+        component_scores["battery"] * 0.30 +
         component_scores["age"] * 0.15 +
-        component_scores["battery"] * 0.25 +
         component_scores["maintenance"] * 0.15 +
-        component_scores["ev"] * 0.08 +
-        component_scores["industrial"] * 0.07 +
+        component_scores["inverter"] * 0.12 +
         component_scores["expansion"] * 0.10 +
-        component_scores["inverter"] * 0.05 +
-        component_scores["uncertainty"] * 0.05
+        component_scores["ev"] * 0.08 +
+        component_scores["size"] * 0.08 +
+        component_scores["warranty"] * 0.02
     )
 
     total_score = min(round(total_raw), 100)
@@ -464,7 +438,6 @@ def compute_opportunity_score(
         OPP_MAINTENANCE: component_scores["maintenance"],
         OPP_SYSTEM_EXPANSION: component_scores["expansion"],
         OPP_EV_CHARGER: component_scores["ev"],
-        OPP_INDUSTRIAL_BATTERY: component_scores["industrial"],
         OPP_INVERTER_REPLACEMENT: component_scores["inverter"],
     }
     primary_reason = max(scored_reasons, key=lambda k: scored_reasons[k])
@@ -580,6 +553,7 @@ def compute_opportunity_score(
         "maintenance_score": round(component_scores["maintenance"]),
         "ev_score": round(component_scores["ev"]),
         "inverter_score": round(component_scores["inverter"]),
+        "warranty_score": round(component_scores["warranty"]),
         "primary_reason": primary_reason,
         "recommended_action": recommended_action,
         "close_probability": close_probability,
