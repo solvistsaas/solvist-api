@@ -3336,7 +3336,7 @@ def top_priority(request: Request, tenant: Tenant):
         db = scoped_client(tenant.jwt)
         res = (
             db.table("clients")
-            .select("id, client_alias, client_name, opportunity_type, expected_value, close_probability, score, priority_score, status, battery_opportunity_score")
+            .select("id, client_alias, client_name, opportunity_type, expected_value, close_probability, score, priority_score, status, battery_opportunity_score, installation_year, system_size_kwp, last_contact_at, status_updated_at")
             .eq("company_id", tenant.company_id)
             .neq("status", "Closed")
             .execute()
@@ -3515,6 +3515,7 @@ def pipeline(request: Request, current_user: OptionalCurrentUser):
             "Contacted": [],
             "Proposal": [],
             "Closed": [],
+            "Lost": [],
         }
 
         if not current_user:
@@ -3541,7 +3542,6 @@ def pipeline(request: Request, current_user: OptionalCurrentUser):
             .execute()
         )
         data = res.data or []
-        print("PIPELINE RAW DATA:", data)
 
         for c in data:
             slug = c.get("opportunity_type")
@@ -3550,8 +3550,6 @@ def pipeline(request: Request, current_user: OptionalCurrentUser):
             if status_value not in grouped_data:
                 status_value = "New"
             grouped_data[status_value].append(c)
-
-        print("PIPELINE GROUPED:", grouped_data)
         return success_response(_json_safe(grouped_data))
     except Exception as e:
         logger.exception(
@@ -3709,7 +3707,7 @@ def get_portal_leads(request: Request, tenant: Tenant):
         try:
             res = (
                 db.table("portal_leads")
-                .select("id, interest_type, requested_at, status, clients(client_alias, client_name)")
+                .select("id, interest_type, requested_at, status, clients(client_alias, client_name, opportunity_type, expected_value, score)")
                 .eq("company_id", company_id)
                 .order("requested_at", desc=True)
                 .limit(10)
@@ -3725,6 +3723,9 @@ def get_portal_leads(request: Request, tenant: Tenant):
                     "id": lead.get("id"),
                     "client_name": client_name,
                     "client_alias": client_data.get("client_alias", "Cliente"),
+                    "opportunity_type": client_data.get("opportunity_type") or lead.get("interest_type"),
+                    "expected_value": client_data.get("expected_value"),
+                    "score": client_data.get("score", 0),
                     "interest_type": lead.get("interest_type"),
                     "requested_at": lead.get("requested_at"),
                     "status": status_raw,
@@ -4013,7 +4014,7 @@ def send_client_portal(request: Request, client_id: str, tenant: Tenant):
 
     client_res = (
         db.table("clients")
-        .select("id")
+        .select("id, portal_token")
         .eq("id", client_id)
         .eq("company_id", tenant.company_id)
         .limit(1)
@@ -4023,9 +4024,14 @@ def send_client_portal(request: Request, client_id: str, tenant: Tenant):
     if not client_res.data:
         raise HTTPException(status_code=404, detail="Client not found or access denied")
 
+    portal_token = client_res.data[0].get("portal_token")
+    if not portal_token:
+        import uuid as _uuid
+        portal_token = str(_uuid.uuid4())
+
     update_res = (
         db.table("clients")
-        .update({"portal_invited": True, "portal_enabled": True})
+        .update({"portal_invited": True, "portal_enabled": True, "portal_token": portal_token})
         .eq("id", client_id)
         .eq("company_id", tenant.company_id)
         .execute()
@@ -4034,7 +4040,7 @@ def send_client_portal(request: Request, client_id: str, tenant: Tenant):
     if not update_res.data:
         raise HTTPException(status_code=500, detail="Failed to generate portal")
 
-    return success_response({"portal_url": f"/portal/{client_id}"})
+    return success_response({"portal_url": f"/portal/{portal_token}"})
 
 
 @app.get("/api/public/portal/{token}")
