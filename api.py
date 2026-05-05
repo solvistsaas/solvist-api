@@ -3336,7 +3336,7 @@ def top_priority(request: Request, tenant: Tenant):
         db = scoped_client(tenant.jwt)
         res = (
             db.table("clients")
-            .select("id, client_alias, opportunity_type, expected_value, close_probability, score, priority_score, status, battery_opportunity_score")
+            .select("id, client_alias, client_name, opportunity_type, expected_value, close_probability, score, priority_score, status, battery_opportunity_score")
             .eq("company_id", tenant.company_id)
             .neq("status", "Closed")
             .execute()
