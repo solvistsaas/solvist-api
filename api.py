@@ -720,6 +720,41 @@ def error_response(message):
     }
 
 
+# ─── Per-Tenant In-Memory Cache (TTL = 60 s) ─────────────────────────────────
+# Avoids hammering Supabase on rapid successive dashboard loads.
+# Key: "{endpoint}:{company_id}"  Value: (payload, expires_at_epoch)
+_CACHE_TTL = 60  # seconds
+_cache: dict = {}
+_cache_lock = Lock()
+
+
+def _cache_get(key: str):
+    """Return cached value or None if missing / expired."""
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is None:
+            return None
+        payload, expires_at = entry
+        if time.time() > expires_at:
+            del _cache[key]
+            return None
+        return payload
+
+
+def _cache_set(key: str, payload) -> None:
+    with _cache_lock:
+        _cache[key] = (payload, time.time() + _CACHE_TTL)
+
+
+def _cache_invalidate(company_id: str) -> None:
+    """Evict all entries for a tenant (call after status changes / imports)."""
+    prefix = f":{company_id}"
+    with _cache_lock:
+        keys_to_del = [k for k in _cache if k.endswith(prefix)]
+        for k in keys_to_del:
+            del _cache[k]
+
+
 def create_opportunity_from_alert(alert: Dict, score: Optional[Dict] = None) -> Dict:
     score = score or {}
 
@@ -3279,30 +3314,29 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
         if not db:
             raise RuntimeError("Base de datos no inicializada")
 
+        # Check cache first
+        cache_key = f"commercial_dashboard:{tenant_id}"
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
+
         logger.info("commercial_dashboard: fetching dashboard metrics for company_id=%s", tenant_id)
         res = db.rpc("get_commercial_dashboard_metrics", {"p_company_id": tenant_id}).execute()
 
-        logger.info("commercial_dashboard: fetching opportunity value rows for company_id=%s", tenant_id)
-        opportunity_value_res = (
+        # B-06 + perf: single query merges expected_value + portal_leads + company in 2 calls
+        # (was 3 separate client queries before)
+        clients_res = (
             db.table("clients")
-            .select("expected_value")
+            .select("expected_value, portal_leads(id)")
             .eq("company_id", tenant_id)
             .gte("score", 40)
             .execute()
         )
-        total_opportunity_value = sum(float(row.get("expected_value") or 0) for row in (opportunity_value_res.data or []))
-
-        hot_leads_res = (
-            db.table("clients")
-            .select("id, portal_leads(id)")
-            .eq("company_id", tenant_id)
-            .gte("score", 40)
-            .execute()
-        )
+        clients_rows = clients_res.data or []
+        total_opportunity_value = sum(float(r.get("expected_value") or 0) for r in clients_rows)
         hot_leads_count = sum(
-            1
-            for row in (hot_leads_res.data or [])
-            if isinstance(row.get("portal_leads"), list) and len(row.get("portal_leads")) > 0
+            1 for r in clients_rows
+            if isinstance(r.get("portal_leads"), list) and len(r["portal_leads"]) > 0
         )
 
         # B-06: fetch company name and plan from companies table
@@ -3318,7 +3352,7 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
 
         if res.data:
             data = res.data[0]
-            return success_response({
+            payload = success_response({
                 "currency": data.get("currency", "EUR"),
                 "total_systems": data.get("total_systems", 0),
                 "total_pipeline_value": float(total_opportunity_value),
@@ -3331,8 +3365,12 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
                 "clients": [],
                 "pipeline": [],
             })
+            _cache_set(cache_key, payload)
+            return payload
 
-        return success_response({**empty_dashboard, "company_name": company_name, "plan": company_plan})
+        payload = success_response({**empty_dashboard, "company_name": company_name, "plan": company_plan})
+        _cache_set(cache_key, payload)
+        return payload
     except Exception as e:
         logger.exception(
             "commercial_dashboard failed user_id=%s company_id=%s",
@@ -3346,27 +3384,31 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
 @limiter.limit("30/minute")
 def top_priority(request: Request, tenant: Tenant):
     try:
+        cache_key = f"top_priority:{tenant.company_id}"
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
+
         db = scoped_client(tenant.jwt)
         res = (
             db.table("clients")
             .select("id, client_alias, client_name, opportunity_type, expected_value, close_probability, score, priority_score, status, battery_opportunity_score, installation_year, system_size_kwp, last_contact_at, status_updated_at")
             .eq("company_id", tenant.company_id)
             .neq("status", "Closed")
+            .order("priority_score", desc=True)
+            .limit(5)
             .execute()
         )
-        # Sort by priority_score descending
-        data = sorted(
-            res.data or [],
-            key=lambda c: (c.get("priority_score", 0) or 0),
-            reverse=True
-        )
+        data = res.data or []
 
         # Enrichment with display names
         for c in data:
             slug = c.get("opportunity_type")
             c["opportunity_type_display"] = opportunity_display_es(slug)
 
-        return success_response(data[:5])
+        payload = success_response(data)
+        _cache_set(cache_key, payload)
+        return payload
     except Exception as e:
         logger.exception("top_priority failed company_id=%s", getattr(tenant, "company_id", None))
         return error_response(str(e))
@@ -3495,6 +3537,9 @@ def update_client_status(request: Request, client_id: str, payload: StatusUpdate
             "event_description": f"Status updated to {payload.status}"
         }).execute()
 
+        # Invalidate dashboard caches so next load reflects the change
+        _cache_invalidate(tenant.company_id)
+
         return success_response(res.data[0])
     except HTTPException:
         raise
@@ -3544,11 +3589,22 @@ def pipeline(request: Request, current_user: OptionalCurrentUser):
             logger.warning("pipeline: missing user_jwt user_id=%s", current_user.id)
             return success_response(grouped_data)
 
+        # Cache check
+        cache_key = f"pipeline:{current_user.company_id}"
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
+
         db = scoped_client(user_jwt)
         logger.info("pipeline: fetching clients for company_id=%s", current_user.company_id)
         res = (
             db.table("clients")
-            .select("*")
+            .select(
+                "id, client_alias, client_name, opportunity_type, expected_value, "
+                "score, priority_score, status, battery_opportunity_score, "
+                "installation_year, system_size_kwp, location_type, "
+                "last_contact_at, status_updated_at, close_probability, closed_value"
+            )
             .eq("company_id", current_user.company_id)
             .gte("score", 40)
             .order("priority_score", desc=True)
@@ -3563,7 +3619,10 @@ def pipeline(request: Request, current_user: OptionalCurrentUser):
             if status_value not in grouped_data:
                 status_value = "New"
             grouped_data[status_value].append(c)
-        return success_response(_json_safe(grouped_data))
+
+        payload = success_response(_json_safe(grouped_data))
+        _cache_set(cache_key, payload)
+        return payload
     except Exception as e:
         logger.exception(
             "pipeline failed user_id=%s company_id=%s",
@@ -3577,7 +3636,15 @@ def pipeline(request: Request, current_user: OptionalCurrentUser):
 @limiter.limit("30/minute")
 def opportunities(request: Request, tenant: AuthTenant, limit: int = 100):
     try:
-        db = admin_client if tenant.user_id == "engine_service" else scoped_client(tenant.jwt)
+        # Skip cache for engine service; also skip if a min_score filter is applied
+        is_engine = tenant.user_id == "engine_service"
+        cache_key = f"opportunities:{tenant.company_id}:{limit}"
+        if not is_engine:
+            cached = _cache_get(cache_key)
+            if cached:
+                return cached
+
+        db = admin_client if is_engine else scoped_client(tenant.jwt)
         safe_limit = max(1, min(limit, 500))
         res = (
             db.table("clients")
@@ -3591,7 +3658,10 @@ def opportunities(request: Request, tenant: AuthTenant, limit: int = 100):
         data = res.data or []
         for item in data:
             item["opportunity_type_display"] = opportunity_display_es(item.get("opportunity_type"))
-        return success_response(data)
+        payload = success_response(data)
+        if not is_engine:
+            _cache_set(cache_key, payload)
+        return payload
     except Exception as e:
         return error_response(str(e))
 
@@ -3654,6 +3724,11 @@ def revenue_recovery(request: Request, tenant: Tenant):
 @limiter.limit("20/minute")
 def opportunity_performance(request: Request, tenant: Tenant):
     try:
+        cache_key = f"opp_perf:{tenant.company_id}"
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
+
         db = scoped_client(tenant.jwt)
         try:
             res = (
@@ -3705,7 +3780,9 @@ def opportunity_performance(request: Request, tenant: Tenant):
                 "conversion_rate": round(rate, 2)
             })
 
-        return success_response(sorted(result, key=lambda x: x["lead_count"], reverse=True))
+        payload = success_response(sorted(result, key=lambda x: x["lead_count"], reverse=True))
+        _cache_set(cache_key, payload)
+        return payload
     except Exception as e:
         print("ERROR IN opportunity_performance:", str(e))
         return error_response(str(e))
@@ -3715,6 +3792,11 @@ def opportunity_performance(request: Request, tenant: Tenant):
 @limiter.limit("20/minute")
 def get_portal_leads(request: Request, tenant: Tenant):
     try:
+        cache_key = f"portal_leads:{tenant.company_id}"
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
+
         db = scoped_client(tenant.jwt)
         company_id = tenant.company_id
         try:
@@ -3777,7 +3859,9 @@ def get_portal_leads(request: Request, tenant: Tenant):
                 )
                 leads = []
 
-        return success_response(leads or [])
+        payload = success_response(leads or [])
+        _cache_set(cache_key, payload)
+        return payload
     except Exception as e:
         print("ERROR IN get_portal_leads:", str(e))
         return error_response(str(e))
@@ -3872,6 +3956,7 @@ def client_contacted(request: Request, client_id: str, tenant: Tenant):
             .eq("company_id", tenant.company_id)
             .execute()
         )
+        _cache_invalidate(tenant.company_id)
         return success_response(res.data[0] if res.data else None)
     except HTTPException:
         raise
