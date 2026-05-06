@@ -3305,6 +3305,17 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
             if isinstance(row.get("portal_leads"), list) and len(row.get("portal_leads")) > 0
         )
 
+        # B-06: fetch company name and plan from companies table
+        company_name = "SOLVIST"
+        company_plan = "professional"
+        try:
+            comp_res = db.table("companies").select("name, plan").eq("id", tenant_id).limit(1).execute()
+            if comp_res.data:
+                company_name = comp_res.data[0].get("name") or company_name
+                company_plan = comp_res.data[0].get("plan") or company_plan
+        except Exception:
+            pass  # non-fatal — use defaults
+
         if res.data:
             data = res.data[0]
             return success_response({
@@ -3315,11 +3326,13 @@ def commercial_dashboard(request: Request, current_user: OptionalCurrentUser):
                 "weighted_forecast": float(data.get("weighted_forecast") or 0),
                 "closed_revenue": float(data.get("closed_revenue") or 0),
                 "hot_leads_count": hot_leads_count,
+                "company_name": company_name,
+                "plan": company_plan,
                 "clients": [],
                 "pipeline": [],
             })
 
-        return success_response(empty_dashboard)
+        return success_response({**empty_dashboard, "company_name": company_name, "plan": company_plan})
     except Exception as e:
         logger.exception(
             "commercial_dashboard failed user_id=%s company_id=%s",
@@ -4476,3 +4489,72 @@ async def onboarding(
     except Exception as e:
         logging.error(f"Onboarding error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Onboarding failed: {str(e)}")
+
+
+# ========== SETTINGS ENDPOINTS (B-07, B-08) ==========
+
+class SettingsUpdateRequest(BaseModel):
+    company_name: Optional[str] = None
+
+
+@app.get("/api/settings")
+@limiter.limit("30/minute")
+def get_settings(request: Request, tenant: Tenant):
+    """B-07: Return company settings (name, plan)."""
+    try:
+        db = scoped_client(tenant.jwt)
+        res = (
+            db.table("companies")
+            .select("id, name, plan, created_at")
+            .eq("id", tenant.company_id)
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            row = res.data[0]
+            return success_response({
+                "company_id": row.get("id"),
+                "company_name": row.get("name") or "SOLVIST",
+                "plan": row.get("plan") or "professional",
+                "created_at": row.get("created_at"),
+            })
+        return success_response({
+            "company_id": tenant.company_id,
+            "company_name": "SOLVIST",
+            "plan": "professional",
+            "created_at": None,
+        })
+    except Exception as e:
+        logger.exception("get_settings failed company_id=%s", tenant.company_id)
+        return error_response(str(e))
+
+
+@app.patch("/api/settings")
+@limiter.limit("10/minute")
+def update_settings(request: Request, payload: SettingsUpdateRequest, tenant: Tenant):
+    """B-08: Persist company name changes."""
+    try:
+        if not payload.company_name or not payload.company_name.strip():
+            raise HTTPException(status_code=422, detail="company_name no puede estar vacío")
+
+        db = scoped_client(tenant.jwt)
+        res = (
+            db.table("companies")
+            .update({"name": payload.company_name.strip()})
+            .eq("id", tenant.company_id)
+            .execute()
+        )
+        if res.data:
+            row = res.data[0]
+            return success_response({
+                "company_id": row.get("id"),
+                "company_name": row.get("name"),
+                "plan": row.get("plan") or "professional",
+            })
+        # update returned no rows — company not found or RLS blocked
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("update_settings failed company_id=%s", tenant.company_id)
+        return error_response(str(e))
