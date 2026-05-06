@@ -4643,3 +4643,58 @@ def update_settings(request: Request, payload: SettingsUpdateRequest, tenant: Te
     except Exception as e:
         logger.exception("update_settings failed company_id=%s", tenant.company_id)
         return error_response(str(e))
+
+
+# ========== SCORING STATUS ENDPOINT ==========
+
+@app.get("/api/scoring-status")
+@limiter.limit("60/minute")
+def get_scoring_status(request: Request, tenant: Tenant):
+    """Return the last scoring timestamp and total scored clients for this tenant.
+
+    Used by the frontend to poll for scoring completion after a CSV import.
+    Returns:
+        status: "never_run" | "completed"
+        last_scored_at: ISO timestamp of the most recently updated client row
+        clients_scored: total number of scored clients for this company
+    """
+    try:
+        db = scoped_client(tenant.jwt)
+
+        # Most recently updated client row — reflects last scoring run
+        last_result = (
+            db.table("clients")
+            .select("updated_at")
+            .eq("company_id", tenant.company_id)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if not last_result.data:
+            return success_response({
+                "status": "never_run",
+                "last_scored_at": None,
+                "clients_scored": 0,
+            })
+
+        last_scored_at = last_result.data[0]["updated_at"]
+
+        # Count total scored clients (exact count via PostgREST)
+        count_result = (
+            db.table("clients")
+            .select("id", count="exact")
+            .eq("company_id", tenant.company_id)
+            .execute()
+        )
+        clients_scored = count_result.count or 0
+
+        return success_response({
+            "status": "completed",
+            "last_scored_at": last_scored_at,
+            "clients_scored": clients_scored,
+        })
+
+    except Exception as e:
+        logger.exception("get_scoring_status failed company_id=%s", tenant.company_id)
+        return error_response(str(e))
