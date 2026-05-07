@@ -55,6 +55,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 import pandas as pd
 from openpyxl import load_workbook
+from report.engine import generate_audit_pdf
 from scoring.engine import (
     compute_opportunity_score,
     OPP_BATTERY_UPGRADE,
@@ -1369,6 +1370,40 @@ app.state.limiter = limiter
 @app.options("/{rest_of_path:path}")
 async def preflight_handler(rest_of_path: str):
     return success_response({"status": "ok"})
+
+
+@app.get("/api/reports/{portfolio_id}/audit")
+def audit_report(
+    portfolio_id: str,
+    current_user=Depends(get_current_user),
+    market: str = "pr",
+):
+    if not current_user.company_id or current_user.company_id != portfolio_id:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    portfolio_client = admin_client or create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    portfolio = (
+        portfolio_client.table("companies")
+        .select("id")
+        .eq("id", portfolio_id)
+        .limit(1)
+        .execute()
+    )
+    if not portfolio.data:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    try:
+        pdf_bytes = generate_audit_pdf(portfolio_id, market=market)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="Report generation timed out")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename=audit-{portfolio_id}.pdf"
+        },
+    )
 
 
 
