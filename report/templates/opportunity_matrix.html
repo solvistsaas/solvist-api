@@ -1,0 +1,30 @@
+<h1>Opportunity Matrix</h1>
+<p>Prioritized opportunities by financial impact and ease of close.</p>
+
+{% if charts.matrix_chart %}
+<div class="chart-container">
+    <img src="data:image/png;base64,{{ charts.matrix_chart }}" alt="Opportunity matrix">
+</div>
+{% endif %}
+
+<h2>Top Opportunities</h2>
+<table>
+    <thead>
+        <tr>
+            <th>System</th>
+            <th>Opportunity</th>
+            <th>Close Prob.</th>
+            <th class="number">Value</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for opportunity in data.top_5_opportunities %}
+        <tr>
+            <td>{{ opportunity.system_name }}</td>
+            <td>{{ opportunity.type_label }}</td>
+            <td>{{ opportunity.close_probability | pct }}</td>
+            <td class="number">{{ opportunity.expected_value | currency }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>

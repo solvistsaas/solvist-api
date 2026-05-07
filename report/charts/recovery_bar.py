@@ -1,0 +1,29 @@
+from report.charts.base import BaseChart
+
+
+class RecoveryBarChart(BaseChart):
+    def render(self):
+        ax = self.ax
+        self.style_axis(ax)
+
+        # data es un dict {type: value}
+        types_sorted = sorted(self.data.items(), key=lambda x: x[1], reverse=True)
+
+        if not types_sorted:
+            ax.text(0.5, 0.5, "No recovery value", ha="center", va="center", color="#6B7280")
+            ax.set_axis_off()
+            return
+
+        labels = [t[0].replace('_', ' ').title() for t in types_sorted]
+        values = [t[1] for t in types_sorted]
+        colors = [self.PALETTE.get(t[0], '#6B7280') for t in types_sorted]
+
+        bars = ax.barh(labels, values, color=colors, height=0.6)
+
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_width() + max(values) * 0.02,
+                bar.get_y() + bar.get_height() / 2,
+                f'${val:,.0f}',
+                va='center', fontsize=9, color='#1A1A2E',
+            )
