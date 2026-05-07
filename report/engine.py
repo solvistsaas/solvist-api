@@ -486,7 +486,12 @@ def build_report_data(scored_systems: list, portfolio: dict, market: str) -> dic
         "font_path": str(FONT_DIR),
         "total_value": sum(s.get("expected_value", 0) for s in scored_systems),
         "systems_analyzed": len(scored_systems),
-        "opportunities_found": len([s for s in scored_systems if s.get("expected_value", 0) > 0]),
+        "opportunities_found": len([
+            s for s in scored_systems
+            if s.get("expected_value", 0) > 0
+            and s.get("total_score", s.get("score", 0)) >= 20
+            and s.get("is_opportunity", True)
+        ]),
         "key_findings": generate_findings(scored_systems),
         "key_risks": generate_risks(scored_systems),
         "assessment": generate_assessment(scored_systems),
