@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import signal
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,10 +29,6 @@ from scoring.engine import compute_opportunity_score
 REPORT_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = REPORT_DIR / "templates"
 FONT_DIR = REPORT_DIR / "static" / "fonts"
-
-
-def _timeout_handler(signum, frame):
-    raise TimeoutError("PDF generation timed out")
 
 
 def _client():
@@ -529,12 +524,6 @@ def generate_audit_pdf(portfolio_id: str, market: str = "pr") -> bytes:
     html = render_html(report_data, charts)
 
     import weasyprint
-
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(10)
-    try:
-        pdf_bytes = weasyprint.HTML(string=html).write_pdf()
-    finally:
-        signal.alarm(0)
+    pdf_bytes = weasyprint.HTML(string=html).write_pdf()
 
     return pdf_bytes
