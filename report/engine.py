@@ -349,7 +349,9 @@ def _build_opportunity_view(scored: dict | None) -> dict | None:
     age = datetime.now().year - year_installed if year_installed else 0
     expected_value = _to_float(scored.get("expected_value"), 0)
     gross_cost = _to_float(breakdown.get("battery_cost_gross_usd", breakdown.get("base_value", expected_value)), expected_value)
-    net_cost = _to_float(breakdown.get("battery_cost_net_usd"), gross_cost)
+    itc_saving = _to_float(breakdown.get("itc_saving_usd"), gross_cost * 0.30)
+    ivu_saving = _to_float(breakdown.get("ivu_saving_usd"), gross_cost * 0.115)
+    net_cost = _to_float(breakdown.get("battery_cost_net_usd"), max(gross_cost - itc_saving - ivu_saving, 0))
     annual_savings = _to_float(
         breakdown.get("annual_savings_usd", scored.get("estimated_battery_savings")),
         0,
@@ -424,8 +426,8 @@ def _build_opportunity_view(scored: dict | None) -> dict | None:
         "gross_cost": gross_cost,
         "net_cost": net_cost,
         "annual_savings": annual_savings,
-        "itc_saving": _to_float(breakdown.get("itc_saving_usd"), gross_cost * 0.30),
-        "ivu_saving": _to_float(breakdown.get("ivu_saving_usd"), gross_cost * 0.115),
+        "itc_saving": itc_saving,
+        "ivu_saving": ivu_saving,
     }
 
 
