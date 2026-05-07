@@ -1,0 +1,52 @@
+<h1>Financial Recovery</h1>
+<p>Portfolio-level value identified across opportunity categories.</p>
+
+{% if charts.recovery_chart %}
+<div class="chart-container">
+    <img src="data:image/png;base64,{{ charts.recovery_chart }}" alt="Financial recovery by type">
+</div>
+{% endif %}
+
+<h2>Investment Summary</h2>
+<table>
+    <tbody>
+        <tr>
+            <td>Total gross investment</td>
+            <td class="number">{{ data.financial_summary.total_gross_investment | currency }}</td>
+        </tr>
+        <tr>
+            <td>Total incentives</td>
+            <td class="number">{{ data.financial_summary.total_incentives | currency }}</td>
+        </tr>
+        <tr>
+            <td>Net investment</td>
+            <td class="number">{{ data.financial_summary.net_investment | currency }}</td>
+        </tr>
+        <tr>
+            <td>Portfolio ROI</td>
+            <td class="number">{{ data.financial_summary.portfolio_roi | pct }}</td>
+        </tr>
+        <tr>
+            <td>Blended payback</td>
+            <td class="number">{{ data.financial_summary.blended_payback }} yrs</td>
+        </tr>
+    </tbody>
+</table>
+
+<h2>Value by Type</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Opportunity Type</th>
+            <th class="number">Value</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for type_label, value in data.value_by_type_display %}
+        <tr>
+            <td>{{ type_label }}</td>
+            <td class="number">{{ value | currency }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>

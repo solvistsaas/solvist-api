@@ -1,0 +1,130 @@
+{% if opportunity %}
+<div class="opportunity-detail">
+    <h1>{{ opportunity.type_label | upper }}</h1>
+    <p class="system-name">{{ opportunity.system_name }}</p>
+
+    <div class="kpi-row">
+        <div class="kpi-card">
+            <span class="kpi-number">{{ opportunity.expected_value | currency }}</span>
+            <span class="kpi-label">Value</span>
+        </div>
+        <div class="kpi-card">
+            <span class="kpi-number">{{ opportunity.payback }} yrs</span>
+            <span class="kpi-label">Payback</span>
+        </div>
+        <div class="kpi-card">
+            <span class="kpi-number">{{ opportunity.close_probability | pct }}</span>
+            <span class="kpi-label">Close Prob</span>
+        </div>
+    </div>
+
+    <div class="narrative">
+        <h2>The Opportunity</h2>
+        <p>{{ opportunity.narrative }}</p>
+    </div>
+
+    {% if opportunity.opportunity_reason == 'battery_upgrade' %}
+    <div class="comparison-block">
+        <h2>Current vs. Proposed</h2>
+        <table class="comparison-table">
+            <thead>
+                <tr>
+                    <th>Current</th>
+                    <th>Proposed</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>No battery storage</td>
+                    <td>{{ opportunity.battery_kwh }} kWh LFP battery</td>
+                </tr>
+                <tr>
+                    <td>Exporting excess production</td>
+                    <td>Stored energy for peak and outage coverage</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="incentive-block">
+        <h2>Incentive Stack</h2>
+        <div class="incentive-row">
+            <span>Gross installed cost</span>
+            <span>{{ opportunity.gross_cost | currency }}</span>
+        </div>
+        <div class="incentive-row">
+            <span>Federal ITC</span>
+            <span>{{ opportunity.itc_saving | currency }}</span>
+        </div>
+        <div class="incentive-row">
+            <span>IVU/local savings</span>
+            <span>{{ opportunity.ivu_saving | currency }}</span>
+        </div>
+        <div class="incentive-row incentive-total">
+            <span>Estimated net cost</span>
+            <span>{{ opportunity.net_cost | currency }}</span>
+        </div>
+    </div>
+
+    {% if opportunity.has_gsp_tariff %}
+    <div class="demand-charge-block warning-box">
+        <h2>Demand Charge Impact</h2>
+        <p>{{ opportunity.demand_charge_narrative }}</p>
+    </div>
+    {% endif %}
+    {% endif %}
+
+    <div class="metrics-block">
+        <h2>Key Metrics</h2>
+        <table>
+            <tbody>
+                {% for metric in opportunity.metrics %}
+                <tr>
+                    <td>{{ metric.label }}</td>
+                    <td class="number">{{ metric.value }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if opportunity.warning %}
+    <div class="warning-box">
+        {{ opportunity.warning }}
+    </div>
+    {% endif %}
+
+    <div class="financial-summary">
+        <h2>Financial Summary</h2>
+        <table>
+            <tbody>
+                <tr>
+                    <td>Gross investment</td>
+                    <td class="number">{{ opportunity.gross_cost | currency }}</td>
+                </tr>
+                <tr>
+                    <td>Net cost after incentives</td>
+                    <td class="number">{{ opportunity.net_cost | currency }}</td>
+                </tr>
+                <tr>
+                    <td>Annual savings/revenue</td>
+                    <td class="number">{{ opportunity.annual_savings | currency }}</td>
+                </tr>
+                <tr>
+                    <td>Payback</td>
+                    <td class="number">{{ opportunity.payback }} yrs</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="talking-points">
+        <h2>Sales Talking Points</h2>
+        <ul>
+            {% for point in opportunity.talking_points %}
+            <li>{{ point }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+{% endif %}
