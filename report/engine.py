@@ -336,6 +336,26 @@ def _metric_value(key: str, value) -> str:
     return str(value)
 
 
+def _annual_savings_value(scored: dict, breakdown: dict, expected_value: float) -> float:
+    annual_savings = _to_float(breakdown.get("annual_savings_usd"), 0)
+    if annual_savings > 0:
+        return annual_savings
+
+    estimated_battery_savings = _to_float(scored.get("estimated_battery_savings"), 0)
+    if estimated_battery_savings > 0:
+        return estimated_battery_savings
+
+    contract_3yr = _to_float(breakdown.get("contract_3yr_usd"), 0)
+    if contract_3yr > 0:
+        return contract_3yr / 3
+
+    annual_contract = _to_float(breakdown.get("annual_contract_usd"), 0)
+    if annual_contract > 0:
+        return annual_contract
+
+    return expected_value * 0.33
+
+
 def _build_opportunity_view(scored: dict | None) -> dict | None:
     if not scored:
         return None
@@ -352,14 +372,13 @@ def _build_opportunity_view(scored: dict | None) -> dict | None:
     itc_saving = _to_float(breakdown.get("itc_saving_usd"), gross_cost * 0.30)
     ivu_saving = _to_float(breakdown.get("ivu_saving_usd"), gross_cost * 0.115)
     net_cost = _to_float(breakdown.get("battery_cost_net_usd"), max(gross_cost - itc_saving - ivu_saving, 0))
-    annual_savings = _to_float(
-        breakdown.get("annual_savings_usd", scored.get("estimated_battery_savings")),
-        0,
-    )
+    annual_savings = _annual_savings_value(scored, breakdown, expected_value)
     payback = _to_float(
         breakdown.get("payback_post_incentivos", scored.get("battery_payback_years")),
         0,
     )
+    if payback <= 0 and annual_savings > 0:
+        payback = net_cost / annual_savings
     battery_kwh = _to_float(
         breakdown.get("battery_kwh", scored.get("battery_kwh_recommended")),
         kw_peak * 1.2,
@@ -442,7 +461,7 @@ def _financial_summary(scored_systems: list) -> dict:
         item_incentives = _to_float(breakdown.get("itc_saving_usd"), 0) + _to_float(breakdown.get("ivu_saving_usd"), 0)
         gross += item_gross
         incentives += item_incentives
-        annual += _to_float(breakdown.get("annual_savings_usd", scored.get("estimated_battery_savings")), 0)
+        annual += _annual_savings_value(scored, breakdown, expected)
     net = max(gross - incentives, 0)
     return {
         "total_gross_investment": gross,
