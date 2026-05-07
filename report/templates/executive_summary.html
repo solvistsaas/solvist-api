@@ -1,0 +1,35 @@
+<h1>Executive Summary</h1>
+<p>{{ data.assessment }}</p>
+
+<div class="kpi-row">
+    <div class="kpi-card">
+        <span class="kpi-number">{{ data.total_value | currency }}</span>
+        <span class="kpi-label">Total Value</span>
+    </div>
+    <div class="kpi-card">
+        <span class="kpi-number">{{ data.systems_analyzed }}</span>
+        <span class="kpi-label">Systems Analyzed</span>
+    </div>
+    <div class="kpi-card">
+        <span class="kpi-number">{{ data.opportunities_found }}</span>
+        <span class="kpi-label">Opportunities Found</span>
+    </div>
+</div>
+
+<h2>Key Findings</h2>
+<ul>
+    {% for finding in data.key_findings %}
+    <li>{{ finding }}</li>
+    {% endfor %}
+</ul>
+
+{% if data.key_risks %}
+<div class="warning-box">
+    <strong>Key Risks</strong>
+    <ul>
+        {% for risk in data.key_risks %}
+        <li>{{ risk }}</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}

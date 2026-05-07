@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    {% include '_styles.html' %}
+</head>
+<body>
+    <div class="page cover-page">
+        {% include 'cover.html' %}
+    </div>
+    <div class="page section-break">
+        {% include 'executive_summary.html' %}
+    </div>
+    <div class="page section-break">
+        {% set opportunity = data.top_opportunity %}
+        {% include 'opportunity_detail.html' %}
+    </div>
+    <div class="page section-break">
+        {% include 'opportunity_matrix.html' %}
+    </div>
+    <div class="page section-break">
+        {% set opportunity = data.second_opportunity %}
+        {% include 'opportunity_detail.html' %}
+    </div>
+    <div class="page section-break">
+        {% include 'financial_recovery.html' %}
+    </div>
+    <div class="page section-break">
+        {% include 'next_actions.html' %}
+    </div>
+    <div class="page section-break">
+        {% include 'methodology.html' %}
+    </div>
+</body>
+</html>
