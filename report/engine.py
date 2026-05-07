@@ -314,6 +314,10 @@ def generate_actions(scored_systems: list) -> dict:
             "text": f"Complete tropical degradation assessment for {len(old_systems)} systems > 3 years old",
         })
 
+    for actions in (this_week, next_30, next_90):
+        for index, action in enumerate(actions, start=1):
+            action["number"] = index
+
     return {
         "this_week": this_week,
         "next_30_days": next_30,
