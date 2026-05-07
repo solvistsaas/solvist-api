@@ -1396,6 +1396,10 @@ def audit_report(
         pdf_bytes = generate_audit_pdf(portfolio_id, market=market)
     except TimeoutError:
         raise HTTPException(status_code=504, detail="Report generation timed out")
+    except Exception as exc:
+        import traceback as tb
+        logger.error("PDF generation failed for portfolio %s: %s\n%s", portfolio_id, exc, tb.format_exc())
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {type(exc).__name__}: {exc}")
 
     return Response(
         content=pdf_bytes,
