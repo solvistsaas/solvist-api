@@ -1,12 +1,14 @@
 """Formatting utilities for PDF report generation."""
 
 
-def format_currency(value: float, market: str = "pr") -> str:
-    """Format currency for PR market ($ prefix, comma thousands)."""
-    if market == "pr":
-        return f"${value:,.0f}"
-    # TODO: EUR for ES market
-    return f"${value:,.0f}"
+def format_currency(value, symbol: str = "$") -> str:
+    """Format currency value with thousands separator."""
+    if value is None:
+        return "N/D"
+    v = float(value)
+    if v >= 1000:
+        return f"{symbol}{v:,.0f}"
+    return f"{symbol}{v:.0f}"
 
 
 def format_currency_k(value: float) -> str:
@@ -16,9 +18,11 @@ def format_currency_k(value: float) -> str:
     return f"${value/1_000:,.0f}K"
 
 
-def format_pct(value: float) -> str:
-    """Format percentage (0.0-1.0 -> XX%)."""
-    return f"{value * 100:.0f}%"
+def format_pct(value) -> str:
+    """Format percentage."""
+    if value is None:
+        return "N/D"
+    return f"{float(value):.1f}%"
 
 
 def format_number(value: float, decimals: int = 1) -> str:
@@ -28,11 +32,27 @@ def format_number(value: float, decimals: int = 1) -> str:
     return f"{value:,.{decimals}f}"
 
 
-def format_payback(years: float) -> str:
-    """Format payback period."""
+def format_payback(years) -> str:
+    """Format payback period in years or months."""
+    if years is None or years <= 0:
+        return "N/D"
     if years < 1:
-        return f"{years * 12:.0f} months"
-    return f"{years:.1f} yrs"
+        months = round(float(years) * 12)
+        return f"{months} meses"
+    return f"{float(years):.1f} años"
+
+
+def format_roi(net_investment, annual_savings) -> str:
+    """Format ROI percentage, capped at 'Ver detalle' if > 300%."""
+    try:
+        if not net_investment or float(net_investment) <= 0:
+            return "N/D"
+        roi = (float(annual_savings) / float(net_investment)) * 100
+        if roi > 300:
+            return "Ver detalle"
+        return f"{roi:.0f}%"
+    except (TypeError, ZeroDivisionError):
+        return "N/D"
 
 
 def format_date(date_obj) -> str:

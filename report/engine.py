@@ -42,6 +42,7 @@ from report.utils.formatting import (
     format_pct,
     format_number,
     format_payback,
+    format_roi,
     format_date,
 )
 from report.i18n import opp_name, OPP_DISPLAY_NAMES  # fuente única de strings ES
@@ -781,6 +782,7 @@ def _render_html(report_data: Dict, charts: Dict[str, str]) -> str:
     env.filters["currency_k"] = lambda v: format_currency_k(v)
     env.filters["pct"] = lambda v: format_pct(v)
     env.filters["payback"] = lambda v: format_payback(v)
+    env.filters["roi"] = lambda net, annual: format_roi(net, annual)
     env.filters["number_fmt"] = lambda v, d=1: format_number(v, d)
     env.filters["date"] = lambda v: format_date(v)
     env.filters["report_date"] = lambda v: format_date(v)
