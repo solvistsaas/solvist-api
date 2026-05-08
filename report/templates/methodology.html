@@ -2,13 +2,16 @@
     <h1>Metodología y Supuestos</h1>
 
     <h2>Fuentes de Datos</h2>
+    {% if data.methodology.data_sources %}
     <ul>
         {% for source in data.methodology.data_sources %}
         <li>{{ source }}</li>
         {% endfor %}
     </ul>
+    {% endif %}
 
     <h2>Supuestos Financieros</h2>
+    {% if data.methodology.financial_assumptions %}
     <table>
         <tbody>
             {% for label, value in data.methodology.financial_assumptions.items() %}
@@ -19,9 +22,11 @@
             {% endfor %}
         </tbody>
     </table>
+    {% endif %}
 
     <h2>Glosario</h2>
-    <table>
+    {% if data.methodology.glossary %}
+    <table class="glossary-table">
         <tbody>
             {% for label, value in data.methodology.glossary.items() %}
             <tr>
@@ -31,4 +36,5 @@
             {% endfor %}
         </tbody>
     </table>
+    {% endif %}
 </div>
