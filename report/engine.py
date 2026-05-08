@@ -800,6 +800,7 @@ def _render_html(report_data: Dict, charts: Dict[str, str]) -> str:
     env.filters["payback"] = lambda v: format_payback(v)
     env.filters["number_fmt"] = lambda v, d=1: format_number(v, d)
     env.filters["date"] = lambda v: format_date(v)
+    env.filters["report_date"] = lambda v: format_date(v)
 
     template = env.get_template("base.html")
 
@@ -1021,6 +1022,7 @@ def _render_compact_html(report_data: Dict, charts: Dict[str, str]) -> str:
     env.filters["payback"] = lambda v: format_payback(v)
     env.filters["number_fmt"] = lambda v, d=1: format_number(v, d)
     env.filters["date"] = lambda v: format_date(v)
+    env.filters["report_date"] = lambda v: format_date(v)
 
     template = env.get_template("compact_base.html")
 
