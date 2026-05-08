@@ -22,7 +22,10 @@ def format_pct(value) -> str:
     """Format percentage."""
     if value is None:
         return "N/D"
-    return f"{float(value):.1f}%"
+    v = float(value)
+    if v <= 1.0:
+        v = v * 100
+    return f"{v:.0f}%"
 
 
 def format_number(value: float, decimals: int = 1) -> str:
