@@ -13,7 +13,7 @@
         <tbody>
             {% for label, value in data.methodology.financial_assumptions.items() %}
             <tr>
-                <td>{{ label.replace('_', ' ').title() }}</td>
+                <td>{{ label }}</td>
                 <td>{{ value }}</td>
             </tr>
             {% endfor %}
