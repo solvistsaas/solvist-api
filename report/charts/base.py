@@ -25,8 +25,9 @@ class BaseChart:
 
     MAX_LABELS = 5  # Máximo de labels visibles en cualquier chart
 
-    def __init__(self, data):
+    def __init__(self, data, hide_axes=False):
         self.data = data
+        self.hide_axes = hide_axes
         self.fig, self.ax = plt.subplots(figsize=self.FIGURE_SIZE)
 
     def style_axis(self, ax):
