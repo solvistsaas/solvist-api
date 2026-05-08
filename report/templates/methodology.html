@@ -26,10 +26,10 @@
 
     <h2>Glosario</h2>
     {% if data.methodology.glossary %}
-    <table class="glossary-table">
+    <table class="glossary-table" style="page-break-inside: avoid; break-inside: avoid;">
         <tbody>
             {% for label, value in data.methodology.glossary.items() %}
-            <tr>
+            <tr style="page-break-inside: avoid; break-inside: avoid;">
                 <td><strong>{{ label }}</strong></td>
                 <td>{{ value }}</td>
             </tr>

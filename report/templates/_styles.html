@@ -318,10 +318,14 @@ td.number {
 .methodology ul {
     padding-left: 16pt;
     margin: 4pt 0;
+    page-break-inside: avoid;
+    break-inside: avoid;
 }
 
 .methodology li {
     margin: 2pt 0;
+    page-break-inside: avoid;
+    break-inside: avoid;
 }
 
 /* === GLOSSARY === */
@@ -350,7 +354,22 @@ td.number {
     font-size: 9pt;
 }
 
+/* === GLOSSARY TABLE CELLS === */
+.glossary-table td {
+    padding: 2pt 4pt;
+    font-size: 9pt;
+}
+
 /* === PRINT === */
+@media print {
+    .glossary-table,
+    .glosario,
+    table.glossary {
+        page-break-inside: avoid;
+        break-inside: avoid;
+    }
+}
+
 .section-break {
     break-before: page;
 }
