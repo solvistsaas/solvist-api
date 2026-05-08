@@ -2,23 +2,35 @@
 
 <div class="action-period">
     <h3>Esta Semana</h3>
+    <ul class="action-list">
     {% for action in data.actions.this_week %}
-    <div class="action-item" data-number="{{ action.number }}">{{ action.text }}</div>
+    {% if action and action.text|trim %}
+    <li>{{ action.text|trim }}</li>
+    {% endif %}
     {% endfor %}
+    </ul>
 </div>
 
 <div class="action-period">
     <h3>Próximos 30 Días</h3>
+    <ul class="action-list">
     {% for action in data.actions.next_30_days %}
-    <div class="action-item" data-number="{{ action.number }}">{{ action.text }}</div>
+    {% if action and action.text|trim %}
+    <li>{{ action.text|trim }}</li>
+    {% endif %}
     {% endfor %}
+    </ul>
 </div>
 
 <div class="action-period">
     <h3>Próximos 90 Días</h3>
+    <ul class="action-list">
     {% for action in data.actions.next_90_days %}
-    <div class="action-item" data-number="{{ action.number }}">{{ action.text }}</div>
+    {% if action and action.text|trim %}
+    <li>{{ action.text|trim }}</li>
+    {% endif %}
     {% endfor %}
+    </ul>
 </div>
 
 <h2>Valor Estimado por Ventana de Acción</h2>
