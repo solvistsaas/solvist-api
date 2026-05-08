@@ -804,42 +804,65 @@ def _render_html(report_data: Dict, charts: Dict[str, str]) -> str:
 
     template = env.get_template("base.html")
 
-    # Top 5 opportunities for the matrix table
-    opportunities = report_data.get("_opportunities", [])
-    top_5 = sorted(opportunities, key=lambda x: x.get("expected_value", 0), reverse=True)[:5]
+    # Top 5 opportunities formatted for matrix table (system_name + type_label required)
+    raw_opps = report_data.get("_opportunities", [])
+    top_5_raw = sorted(raw_opps, key=lambda x: x.get("expected_value", 0), reverse=True)[:5]
+    top_5_formatted = [
+        {
+            "system_name": s.get("_system", {}).get("name", "Unknown"),
+            "type_label": OPP_DISPLAY_NAMES.get(
+                s.get("primary_reason", ""),
+                s.get("primary_reason", "").replace("_", " ").title(),
+            ),
+            "close_probability": s.get("close_probability", 0),
+            "expected_value": s.get("expected_value", 0),
+        }
+        for s in top_5_raw
+    ]
 
     # Action values by window
     action_values = _calculate_action_values(report_data)
 
+    # Build data + charts dicts matching template access patterns (data.xxx / charts.xxx)
+    data = {
+        "client_name": report_data["client_name"],
+        "date": report_data["date"],
+        "market_label": report_data["market_label"],
+        "assessment": report_data["assessment"],
+        "total_value": report_data["total_value"],
+        "systems_analyzed": report_data["systems_analyzed"],
+        "opportunities_found": report_data["opportunities_found"],
+        "key_findings": report_data["key_findings"],
+        "key_risks": report_data["key_risks"],
+        "top_opportunity": report_data["top_opportunity"],
+        "second_opportunity": report_data["second_opportunity"],
+        "financial_summary": report_data["financial_summary"],
+        "value_by_type_display": sorted(
+            report_data["value_by_type"].items(), key=lambda x: -x[1]
+        ),
+        "top_5_opportunities": top_5_formatted,
+        "methodology": report_data["methodology"],
+        "actions": {
+            "this_week": report_data["recommended_actions"]["this_week"],
+            "next_30_days": report_data["recommended_actions"]["next_30_days"],
+            "next_90_days": report_data["recommended_actions"]["next_90_days"],
+            "estimated_value": {
+                "this_week": action_values["this_week"],
+                "next_30": action_values["next_30_days"],
+                "next_90": action_values["next_90_days"],
+            },
+        },
+    }
+
+    charts_ctx = {
+        "matrix_chart": charts.get("matrix_chart", ""),
+        "recovery_chart": charts.get("recovery_chart", ""),
+    }
+
     html = template.render(
-        client_name=report_data["client_name"],
-        date=report_data["date"],
-        market_label=report_data["market_label"],
+        data=data,
+        charts=charts_ctx,
         font_path=report_data["font_path"],
-        # Executive Summary
-        total_value=report_data["total_value"],
-        systems_analyzed=report_data["systems_analyzed"],
-        opportunities_found=report_data["opportunities_found"],
-        key_findings=report_data["key_findings"],
-        key_risks=report_data["key_risks"],
-        assessment=report_data["assessment"],
-        # Opportunity #1
-        opp1=report_data["top_opportunity"],
-        # Opportunity Matrix
-        matrix_chart=charts.get("matrix_chart", ""),
-        top_5_opportunities=top_5,
-        opp_display_names=OPP_DISPLAY_NAMES,
-        # Opportunity #2
-        opp2=report_data["second_opportunity"],
-        # Financial Recovery
-        financial_summary=report_data["financial_summary"],
-        value_by_type=report_data["value_by_type"],
-        recovery_chart=charts.get("recovery_chart", ""),
-        # Actions
-        recommended_actions=report_data["recommended_actions"],
-        action_values=action_values,
-        # Methodology
-        methodology=report_data["methodology"],
     )
 
     return html
