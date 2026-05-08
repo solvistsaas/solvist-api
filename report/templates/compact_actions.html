@@ -1,0 +1,49 @@
+{# Compact Actions — 70/30 layout with CTA #}
+<div class="compact-section-title">Próximos Pasos</div>
+<div class="compact-section-subtitle">Plan de acción recomendado</div>
+
+<div class="actions-layout" style="margin-top: 16pt;">
+    {# 70% — Action items #}
+    <div class="actions-main">
+        <div class="compact-action-period">
+            <h3>Esta Semana</h3>
+            {% if top_opportunity %}
+            <div class="compact-action-item" data-number="1">
+                Contactar {{ top_opportunity.name }} re: {{ top_opportunity.type_label }}
+                ({{ top_opportunity.value | currency }} · {{ top_opportunity.close_prob | pct }} prob. cierre)
+            </div>
+            {% else %}
+            <div class="compact-action-item" data-number="1">Contactar cliente principal para revisión de portafolio</div>
+            {% endif %}
+        </div>
+
+        <div class="compact-action-period">
+            <h3>Próximos 30 Días</h3>
+            <div class="compact-action-item" data-number="1">
+                Preparar propuestas para {{ opportunities_count }} sistema{% if opportunities_count != 1 %}s{% endif %} identificado{% if opportunities_count != 1 %}s{% endif %}
+            </div>
+            <div class="compact-action-item" data-number="2">
+                Someter sistemas elegibles al programa CBES
+            </div>
+        </div>
+
+        <div class="compact-action-period">
+            <h3>Próximos 90 Días</h3>
+            <div class="compact-action-item" data-number="1">
+                Evaluación de degradación tropical para {{ systems_count }} sistema{% if systems_count != 1 %}s{% endif %} con más de 3 años
+            </div>
+        </div>
+    </div>
+
+    {# 30% — Sidebar with CTA #}
+    <div class="actions-sidebar">
+        <div class="actions-sidebar-text">
+            Este análisis utiliza datos estáticos. Con Solvist activo monitorizamos cambios tarifarios, degradación y nuevas oportunidades continuamente.
+        </div>
+        <div>
+            <a class="actions-cta" href="{{ cta_url }}">
+                → Demo de 15 minutos
+            </a>
+        </div>
+    </div>
+</div>

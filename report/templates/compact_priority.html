@@ -1,0 +1,47 @@
+{# Compact Priority Ladder — Opportunity cards, max 4, no charts #}
+<div class="compact-section-title">Oportunidades Prioritarias</div>
+<div class="compact-section-subtitle">Ordenadas por impacto financiero y probabilidad de cierre</div>
+
+{% if opportunities %}
+
+{% for opp in opportunities %}
+<div class="priority-card {% if loop.index == 1 %}priority-card-first{% endif %}">
+    <div class="priority-rank {% if loop.index == 1 %}priority-rank-first{% endif %}">{{ loop.index }}</div>
+    <div class="priority-content">
+        {% if loop.index == 1 %}
+        <div class="priority-badge">Prioridad Inmediata</div>
+        {% endif %}
+        <div class="priority-header">
+            <span class="priority-name">{{ opp.system_name }}</span>
+            <span class="priority-value">{{ opp.expected_value | currency }}</span>
+        </div>
+        <div class="priority-type">{{ opp.type_label }}</div>
+        <div class="priority-meta">{{ opp.kw_peak | number_fmt(0) }} kWp · {{ opp.year_installed }}</div>
+        <div class="priority-metrics">
+            <span>
+                <span class="priority-metric-label">Ahorro: </span>
+                <span class="priority-metric-value">{{ opp.annual_savings | currency }}/año</span>
+            </span>
+            <span>
+                <span class="priority-metric-label">Payback: </span>
+                <span class="priority-metric-value">{{ opp.payback_years | payback }}</span>
+            </span>
+            <span>
+                <span class="priority-metric-label">Cierre: </span>
+                <span class="priority-metric-value">{{ opp.close_probability | pct }}</span>
+            </span>
+        </div>
+    </div>
+</div>
+{% endfor %}
+
+{% else %}
+
+<div class="compact-empty-state">
+    <div style="font-size: 14pt; margin-bottom: 8pt;">Sin oportunidades detectadas</div>
+    <div style="font-size: 9pt; color: var(--compact-muted);">
+        No se identificaron oportunidades accionables en este portfolio con los datos proporcionados.
+    </div>
+</div>
+
+{% endif %}
