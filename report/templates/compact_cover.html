@@ -1,0 +1,38 @@
+{# Compact Cover — Single page, data-forward #}
+<div class="compact-accent-bar"></div>
+
+<div style="flex: 1; display: flex; flex-direction: column; justify-content: center;">
+    <div class="cover-client" style="font-size: 24pt; margin-bottom: 8pt;">{{ company_name }}</div>
+    <div style="font-size: 11pt; color: var(--compact-muted); margin-bottom: 20pt;">
+        Auditoría de Portfolio Solar · Puerto Rico · {{ date | date }}
+    </div>
+
+    <div class="cover-data-grid">
+        <div class="cover-data-cell">
+            <span class="cover-data-value">{{ total_installations }}</span>
+            <span class="cover-data-label">Sistemas</span>
+        </div>
+        <div class="cover-data-cell">
+            <span class="cover-data-value">{{ total_kwp | number_fmt(0) }}</span>
+            <span class="cover-data-label">kWp Total</span>
+        </div>
+        <div class="cover-data-cell">
+            <span class="cover-data-value">{{ year_range }}</span>
+            <span class="cover-data-label">Período</span>
+        </div>
+        <div class="cover-data-cell">
+            <span class="cover-data-value">{{ opportunities_count }}</span>
+            <span class="cover-data-label">Oportunidades</span>
+        </div>
+    </div>
+
+    <div class="cover-anchor">
+        {% if total_installations == 1 %}
+        1 instalación analizada{% else %}
+        {{ total_installations }} instalaciones analizadas{% endif %} · {{ total_value | currency }} en ingresos recuperables identificados
+    </div>
+</div>
+
+<div style="font-size: 7pt; color: #9CA3AF; text-transform: uppercase; letter-spacing: 2.5pt; text-align: center; padding-top: 12pt;">
+    Confidencial · Generado por Solvist
+</div>

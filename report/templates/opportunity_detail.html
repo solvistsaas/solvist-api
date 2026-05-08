@@ -1,130 +1,135 @@
 {% if opportunity %}
-<div class="opportunity-detail">
-    <h1>{{ opportunity.type_label | upper }}</h1>
-    <p class="system-name">{{ opportunity.system_name }}</p>
+<h1>{{ opportunity.type_label | upper }}</h1>
+<p style="font-size: 11pt; color: #6B7280; margin-top: 0;">{{ opportunity.system_name }}</p>
 
-    <div class="kpi-row">
-        <div class="kpi-card">
-            <span class="kpi-number">{{ opportunity.expected_value | currency }}</span>
-            <span class="kpi-label">Value</span>
-        </div>
-        <div class="kpi-card">
-            <span class="kpi-number">{{ opportunity.payback }} yrs</span>
-            <span class="kpi-label">Payback</span>
-        </div>
-        <div class="kpi-card">
-            <span class="kpi-number">{{ opportunity.close_probability | pct }}</span>
-            <span class="kpi-label">Close Prob</span>
-        </div>
+<div class="kpi-row">
+    <div class="kpi-card">
+        <span class="kpi-number">{{ opportunity.expected_value | currency }}</span>
+        <span class="kpi-label">Valor</span>
     </div>
-
-    <div class="narrative">
-        <h2>The Opportunity</h2>
-        <p>{{ opportunity.narrative }}</p>
+    <div class="kpi-card">
+        <span class="kpi-number">{{ opportunity.payback_years | payback }}</span>
+        <span class="kpi-label">Retorno</span>
     </div>
-
-    {% if opportunity.opportunity_reason == 'battery_upgrade' %}
-    <div class="comparison-block">
-        <h2>Current vs. Proposed</h2>
-        <table class="comparison-table">
-            <thead>
-                <tr>
-                    <th>Current</th>
-                    <th>Proposed</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td>No battery storage</td>
-                    <td>{{ opportunity.battery_kwh }} kWh LFP battery</td>
-                </tr>
-                <tr>
-                    <td>Exporting excess production</td>
-                    <td>Stored energy for peak and outage coverage</td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-
-    <div class="incentive-block">
-        <h2>Incentive Stack</h2>
-        <div class="incentive-row">
-            <span>Gross installed cost</span>
-            <span>{{ opportunity.gross_cost | currency }}</span>
-        </div>
-        <div class="incentive-row">
-            <span>Federal ITC</span>
-            <span>{{ opportunity.itc_saving | currency }}</span>
-        </div>
-        <div class="incentive-row">
-            <span>IVU/local savings</span>
-            <span>{{ opportunity.ivu_saving | currency }}</span>
-        </div>
-        <div class="incentive-row incentive-total">
-            <span>Estimated net cost</span>
-            <span>{{ opportunity.net_cost | currency }}</span>
-        </div>
-    </div>
-
-    {% if opportunity.has_gsp_tariff %}
-    <div class="demand-charge-block warning-box">
-        <h2>Demand Charge Impact</h2>
-        <p>{{ opportunity.demand_charge_narrative }}</p>
-    </div>
-    {% endif %}
-    {% endif %}
-
-    <div class="metrics-block">
-        <h2>Key Metrics</h2>
-        <table>
-            <tbody>
-                {% for metric in opportunity.metrics %}
-                <tr>
-                    <td>{{ metric.label }}</td>
-                    <td class="number">{{ metric.value }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-
-    {% if opportunity.warning %}
-    <div class="warning-box">
-        {{ opportunity.warning }}
-    </div>
-    {% endif %}
-
-    <div class="financial-summary">
-        <h2>Financial Summary</h2>
-        <table>
-            <tbody>
-                <tr>
-                    <td>Gross investment</td>
-                    <td class="number">{{ opportunity.gross_cost | currency }}</td>
-                </tr>
-                <tr>
-                    <td>Net cost after incentives</td>
-                    <td class="number">{{ opportunity.net_cost | currency }}</td>
-                </tr>
-                <tr>
-                    <td>Annual savings/revenue</td>
-                    <td class="number">{{ opportunity.annual_savings | currency }}</td>
-                </tr>
-                <tr>
-                    <td>Payback</td>
-                    <td class="number">{{ opportunity.payback }} yrs</td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-
-    <div class="talking-points">
-        <h2>Sales Talking Points</h2>
-        <ul>
-            {% for point in opportunity.talking_points %}
-            <li>{{ point }}</li>
-            {% endfor %}
-        </ul>
+    <div class="kpi-card">
+        <span class="kpi-number">{{ opportunity.close_probability | pct }}</span>
+        <span class="kpi-label">Prob. Cierre</span>
     </div>
 </div>
+
+<h2>La Oportunidad</h2>
+<p>{{ opportunity.narrative }}</p>
+
+{# Battery-specific blocks (conditional) #}
+{% if opportunity.comparison %}
+<div class="comparison-block">
+    <h2>Estado Actual vs. Propuesta</h2>
+    <table class="comparison-table">
+        <thead>
+            <tr>
+                <th>Actual</th>
+                <th>Propuesta</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for key in opportunity.comparison.current %}
+            <tr>
+                <td>{{ opportunity.comparison.current[key] }}</td>
+                <td>{{ opportunity.comparison.proposed[key] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if opportunity.incentive_stack %}
+<div class="incentive-block">
+    <h2>Incentivos Disponibles</h2>
+    <div class="incentive-row">
+        <span>Costo bruto de instalación</span>
+        <span style="font-family: 'Playfair Display', serif;">${{ "{:,.0f}".format(opportunity.incentive_stack.gross_cost) }}</span>
+    </div>
+    <div class="incentive-row">
+        <span>ITC Federal (30%)</span>
+        <span style="color: #059669;">−${{ "{:,.0f}".format(opportunity.incentive_stack.itc_saving) }}</span>
+    </div>
+    <div class="incentive-row">
+        <span>Exención IVU (11.5%)</span>
+        <span style="color: #059669;">−${{ "{:,.0f}".format(opportunity.incentive_stack.ivu_saving) }}</span>
+    </div>
+    <div class="incentive-row incentive-total">
+        <span><strong>Costo neto estimado</strong></span>
+        <span style="font-family: 'Playfair Display', serif; font-size: 11pt;"><strong>${{ "{:,.0f}".format(opportunity.incentive_stack.net_cost) }}</strong></span>
+    </div>
+</div>
+{% endif %}
+
+{% if opportunity.demand_charge_block %}
+<h2>Impacto en Cargos por Demanda</h2>
+<p>{{ opportunity.demand_charge_block }}</p>
+{% endif %}
+
+{# Generic metrics block (always present) #}
+{% if opportunity.metrics %}
+<div class="metrics-block" style="page-break-inside: avoid; break-inside: avoid;">
+    <h2>Métricas Clave</h2>
+    <table>
+        <tbody>
+            {% for metric in opportunity.metrics %}
+            <tr>
+                <td>{{ metric.label }}</td>
+                <td class="number">{{ metric.value }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{# Warning box (conditional) #}
+{% if opportunity.warning %}
+<div class="warning-box">
+    {{ opportunity.warning }}
+</div>
+{% endif %}
+
+{# Financial summary (always present) #}
+<div class="financial-summary" style="page-break-inside: avoid; break-inside: avoid;">
+    <h2>Resumen Financiero</h2>
+    <table>
+        <tr>
+            <td>Inversión bruta</td>
+            <td class="number">${{ "{:,.0f}".format(opportunity.financial.gross_investment) }}</td>
+        </tr>
+        <tr>
+            <td>Incentivos totales</td>
+            <td class="number" style="color: #059669;">${{ "{:,.0f}".format(opportunity.financial.total_incentives) }}</td>
+        </tr>
+        <tr>
+            <td><strong>Costo neto después de incentivos</strong></td>
+            <td class="number"><strong>${{ "{:,.0f}".format(opportunity.financial.net_cost) }}</strong></td>
+        </tr>
+        <tr>
+            <td>Ahorro/ingresos anuales</td>
+            <td class="number">${{ "{:,.0f}".format(opportunity.financial.annual_savings) }}</td>
+        </tr>
+        <tr>
+            <td>Retorno de inversión</td>
+            <td class="number">{{ opportunity.financial.payback_years | payback }}</td>
+        </tr>
+    </table>
+</div>
+
+{# Sales talking points #}
+{% if opportunity.talking_points %}
+<div class="talking-points" style="page-break-inside: avoid; break-inside: avoid;">
+    <h2>Puntos de Venta</h2>
+    <ul>
+        {% for point in opportunity.talking_points %}
+        <li>{{ point }}</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
 {% endif %}

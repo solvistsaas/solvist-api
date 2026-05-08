@@ -1,0 +1,53 @@
+{# Compact Recovery — KPIs + stacked bar + context #}
+<div class="compact-section-title">Potencial de Recuperación</div>
+<div class="compact-section-subtitle">Valor identificado en tu portfolio</div>
+
+{% if total_value > 0 %}
+
+<div class="compact-kpi-row">
+    <div class="compact-kpi-card">
+        <span class="compact-kpi-number">{{ total_value | currency }}</span>
+        <span class="compact-kpi-label">Valor Recuperable</span>
+    </div>
+    <div class="compact-kpi-card">
+        <span class="compact-kpi-number">{{ annual_savings | currency }}</span>
+        <span class="compact-kpi-label">Ahorro Anual</span>
+    </div>
+    <div class="compact-kpi-card">
+        <span class="compact-kpi-number">{{ payback_years | payback }}</span>
+        <span class="compact-kpi-label">Payback Post-Incentivos</span>
+    </div>
+</div>
+
+{% if recovery_chart %}
+<div class="compact-chart-container">
+    <img src="data:image/png;base64,{{ recovery_chart }}" alt="Ingresos Recuperables por Tipo" />
+</div>
+{% endif %}
+
+<div class="incentive-note">
+    ITC federal (30%) · Exención IVU (11.5%) · Programa CBES disponible
+</div>
+
+<div class="recovery-context">
+    {% if systems_without_battery > 0 %}
+    {% if total_systems == 1 and systems_without_battery == 1 %}
+    Tu único sistema no tiene almacenamiento. Estimamos cargos evitables de hasta {{ avoidable_charges | currency }}/año basado en tarifas LUMA vigentes.
+    {% else %}
+    {{ systems_without_battery }} de tus {{ total_systems }} sistemas sin almacenamiento. Estimamos cargos evitables de hasta {{ avoidable_charges | currency }}/año basado en tarifas LUMA vigentes.
+    {% endif %}
+    {% else %}
+    Todas tus instalaciones cuentan con almacenamiento. El valor identificado proviene de optimización de contratos O&M, expansión de capacidad y participación en programas CBES/VPP.
+    {% endif %}
+</div>
+
+{% else %}
+
+<div class="compact-empty-state">
+    <div style="font-size: 14pt; margin-bottom: 8pt;">Sin oportunidades significativas</div>
+    <div style="font-size: 9pt; color: var(--compact-muted);">
+        Tu portfolio está bien optimizado. No se detectaron oportunidades de recuperación significativas con los datos actuales.
+    </div>
+</div>
+
+{% endif %}
