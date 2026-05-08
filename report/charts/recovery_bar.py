@@ -1,11 +1,7 @@
 import matplotlib.ticker as mticker
 
 from report.charts.base import BaseChart
-
-
-DISPLAY_LABELS = {
-    "maintenance": "O&M Contract",
-}
+from report.i18n import opp_name
 
 
 class RecoveryBarChart(BaseChart):
@@ -22,13 +18,13 @@ class RecoveryBarChart(BaseChart):
         types_sorted = sorted(self.data.items(), key=lambda x: x[1], reverse=True)
 
         if not types_sorted:
-            ax.text(0.5, 0.5, "No recovery value", ha="center", va="center", color="#6B7280")
+            ax.text(0.5, 0.5, "Sin valor recuperable", ha="center", va="center", color="#6B7280")
             ax.set_axis_off()
             return
 
-        labels = [DISPLAY_LABELS.get(t[0], t[0].replace('_', ' ').title()) for t in types_sorted]
-        values = [t[1] for t in types_sorted]
-        colors = [self.PALETTE.get(t[0], '#6B7280') for t in types_sorted]
+        labels = [opp_name(item[0]) for item in types_sorted]
+        values = [item[1] for item in types_sorted]
+        colors = [self.PALETTE.get(item[0], '#6B7280') for item in types_sorted]
 
         bars = ax.barh(labels, values, color=colors, height=0.6)
 

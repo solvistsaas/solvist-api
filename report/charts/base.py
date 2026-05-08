@@ -4,6 +4,11 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend, required for server-side
 import matplotlib.pyplot as plt
 
+from report.i18n import t, opp_name  # noqa: F401 — re-exported for chart subclasses
+
+# Fuente consistente en todos los charts generados server-side
+plt.rcParams.update({'font.family': 'DejaVu Sans'})
+
 
 class BaseChart:
     """Todos los charts heredan esta clase."""

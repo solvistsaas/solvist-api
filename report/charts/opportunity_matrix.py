@@ -6,6 +6,7 @@ Uses numbered markers (#1, #2...) on bubbles for clean readability.
 System names appear in the adjacent table. X-axis scaled 0–1.0.
 """
 from report.charts.base import BaseChart
+from report.i18n import t
 import matplotlib.ticker as mticker
 import matplotlib.pyplot as plt
 

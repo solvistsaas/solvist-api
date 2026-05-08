@@ -44,22 +44,9 @@ from report.utils.formatting import (
     format_payback,
     format_date,
 )
+from report.i18n import opp_name, OPP_DISPLAY_NAMES  # fuente única de strings ES
 
 logger = logging.getLogger("solvist.report")
-
-# ─── Display names for consistent nomenclature (fix D-5) ──────────────────────
-
-OPP_DISPLAY_NAMES = {
-    "battery_upgrade": "Instalación de Baterías",
-    "industrial_battery": "Batería Industrial",
-    "maintenance": "Contrato O&M",
-    "inverter_replacement": "Reemplazo de Inversor",
-    "system_expansion": "Expansión del Sistema",
-    "ev_charger": "Carga EV",
-    "peak_shaving": "Reducción de Pico",
-    "vpp_monetization": "Ingresos VPP",
-    "tropical_degradation": "Degradación Tropical",
-}
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -221,7 +208,7 @@ def _build_report_data(
     value_by_type: Dict[str, float] = {}
     for opp in opportunities:
         opp_type = opp.get("primary_reason", "unknown")
-        display_name = OPP_DISPLAY_NAMES.get(opp_type, opp_type.replace("_", " ").title())
+        display_name = opp_name(opp_type)
         value_by_type[display_name] = value_by_type.get(display_name, 0) + opp.get("expected_value", 0)
 
     # ── Financial summary ──
@@ -399,7 +386,7 @@ def _build_opportunity_detail(scored: Dict, market: str) -> Dict[str, Any]:
     battery_kwh = vb.get("battery_kwh", kw_peak * BATTERY_KWH_PER_KWP)
 
     # Format narrative with real data
-    narrative = opp_narrative.get("the_opportunity", f"Opportunity identified for {system_name}.")
+    narrative = opp_narrative.get("the_opportunity", f"Oportunidad identificada para {system_name}.")
     try:
         narrative = narrative.format(
             system_name=system_name,
@@ -496,7 +483,7 @@ def _build_opportunity_detail(scored: Dict, market: str) -> Dict[str, Any]:
     }
 
     return {
-        "type_label": OPP_DISPLAY_NAMES.get(reason, reason.replace("_", " ").title()),
+        "type_label": opp_name(reason),
         "system_name": system_name,
         "opportunity_reason": reason,
         "expected_value": scored.get("expected_value", 0),
@@ -704,10 +691,8 @@ def _generate_recommended_actions(
         sys = top_opportunity.get("_system", {})
         try:
             action_text = ACTION_TEMPLATES["this_week"][0]["action"].format(
-                client_name=sys.get("name", "top client"),
-                opp_type=OPP_DISPLAY_NAMES.get(
-                    top_opportunity.get("primary_reason", ""), "opportunity"
-                ),
+                client_name=sys.get("name", "cliente principal"),
+                opp_type=opp_name(top_opportunity.get("primary_reason", "")),
                 value=top_opportunity.get("expected_value", 0),
                 prob=round(top_opportunity.get("close_probability", 0) * 100),
             )
@@ -717,9 +702,7 @@ def _generate_recommended_actions(
 
     # Next 30 days
     opp_count = len(opportunities)
-    top_type = OPP_DISPLAY_NAMES.get(
-        top_opportunity.get("primary_reason", ""), "opportunity"
-    ) if top_opportunity else "opportunity"
+    top_type = opp_name(top_opportunity.get("primary_reason", "")) if top_opportunity else "oportunidad"
 
     try:
         actions["next_30_days"].append({
@@ -810,10 +793,7 @@ def _render_html(report_data: Dict, charts: Dict[str, str]) -> str:
     top_5_formatted = [
         {
             "system_name": s.get("_system", {}).get("name", "Unknown"),
-            "type_label": OPP_DISPLAY_NAMES.get(
-                s.get("primary_reason", ""),
-                s.get("primary_reason", "").replace("_", " ").title(),
-            ),
+            "type_label": opp_name(s.get("primary_reason", "")),
             "close_probability": s.get("close_probability", 0),
             "expected_value": s.get("expected_value", 0),
         }
@@ -927,7 +907,7 @@ def _build_compact_report_data(
     value_by_type: Dict[str, float] = {}
     for opp in opportunities:
         opp_type = opp.get("primary_reason", "unknown")
-        display_name = OPP_DISPLAY_NAMES.get(opp_type, opp_type.replace("_", " ").title())
+        display_name = opp_name(opp_type)
         value_by_type[display_name] = value_by_type.get(display_name, 0) + opp.get("expected_value", 0)
 
     # Cover data
@@ -978,7 +958,7 @@ def _build_compact_report_data(
 
         priority_opps.append({
             "system_name": sys.get("name", "Sistema"),
-            "type_label": OPP_DISPLAY_NAMES.get(reason, reason.replace("_", " ").title()),
+            "type_label": opp_name(reason),
             "kw_peak": sys.get("kw_peak", 0),
             "year_installed": sys.get("year_installed", "—"),
             "expected_value": opp.get("expected_value", 0),
@@ -996,7 +976,7 @@ def _build_compact_report_data(
         reason = top_opp_raw.get("primary_reason", "")
         top_opportunity = {
             "name": sys.get("name", "cliente principal"),
-            "type_label": OPP_DISPLAY_NAMES.get(reason, reason.replace("_", " ").title()),
+            "type_label": opp_name(reason),
             "value": top_opp_raw.get("expected_value", 0),
             "close_prob": top_opp_raw.get("close_probability", 0),
         }
