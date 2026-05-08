@@ -29,12 +29,14 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from report.text.narratives import (
     FINDING_TEMPLATES,
+    ASSESSMENT_TEXTS,
     ASSESSMENT_TEMPLATES,
     RISK_TEMPLATES,
     OPPORTUNITY_NARRATIVES,
     DEMAND_CHARGE_NARRATIVE,
     METHODOLOGY_PR,
     ACTION_TEMPLATES,
+    build_opportunity_narrative,
 )
 from report.utils.formatting import (
     format_currency,
@@ -386,27 +388,16 @@ def _build_opportunity_detail(scored: Dict, market: str) -> Dict[str, Any]:
     payback_years = (net_cost / annual_savings) if annual_savings > 0 and net_cost > 0 else 0
     battery_kwh = vb.get("battery_kwh", kw_peak * BATTERY_KWH_PER_KWP)
 
-    # Format narrative with real data
-    narrative = opp_narrative.get("the_opportunity", f"Oportunidad identificada para {system_name}.")
-    try:
-        narrative = narrative.format(
-            system_name=system_name,
-            kw_peak=kw_peak,
-            tariff=tariff,
-            annual_peak_cost=annual_savings,
-            battery_kwh=round(battery_kwh),
-            age=2026 - sys.get("year_installed", 2020) if sys.get("year_installed") else 5,
-            delta_pct=round(vb.get("estimated_degradation_pct", 5.5), 1),
-            annual_loss=vb.get("annual_loss_usd", 0),
-            recovery_pct=4,
-            annual_gain=vb.get("annual_savings_usd", annual_savings),
-            monthly_charge=vb.get("monthly_demand_charge_usd", 0),
-            reduction_pct=55,
-            annual_saving=vb.get("annual_saving_usd", 0),
-            annual_revenue=vb.get("annual_vpp_revenue_usd", 0),
-        )
-    except (KeyError, IndexError):
-        pass  # Use template as-is if interpolation fails
+    # Build contextual narrative
+    narrative = build_opportunity_narrative(
+        opp_type=reason,
+        client_name=system_name,
+        kwp=float(kw_peak),
+        install_year=int(sys.get("year_installed", 2020)),
+        value_breakdown=vb,
+        has_battery=sys.get("has_battery", False),
+        age_years=2026 - sys.get("year_installed", 2020) if sys.get("year_installed") else None,
+    )
 
     # Format talking points (BUG-2 FIX: correct net vs gross)
     raw_points = opp_narrative.get("talking_points", [])
@@ -652,26 +643,14 @@ def _generate_assessment(
     if not opportunities:
         return "No se identificaron oportunidades significativas en este portafolio."
 
-    top_type = max(value_by_type, key=value_by_type.get) if value_by_type else "general"
-    top_value = value_by_type.get(top_type, 0)
-
     if total_value > 500_000:
-        try:
-            return ASSESSMENT_TEMPLATES["critical"].format(
-                top_type=top_type, top_value=top_value
-            )
-        except (KeyError, IndexError):
-            pass
-    elif total_value > 100_000:
-        second_type = list(value_by_type.keys())[1] if len(value_by_type) > 1 else top_type
-        try:
-            return ASSESSMENT_TEMPLATES["moderate"].format(
-                top_type=top_type, second_type=second_type, total=total_value
-            )
-        except (KeyError, IndexError):
-            pass
+        return ASSESSMENT_TEXTS["excellent"]
+    elif total_value > 200_000:
+        return ASSESSMENT_TEXTS["good"]
+    elif total_value > 50_000:
+        return ASSESSMENT_TEXTS["moderate"]
 
-    return f"Este portafolio tiene {len(opportunities)} oportunidades que representan ${total_value:,.0f} en valor identificado."
+    return ASSESSMENT_TEXTS["low"]
 
 
 # ─── Recommended actions generator ────────────────────────────────────────────
