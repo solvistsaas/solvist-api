@@ -1,14 +1,14 @@
 <div class="methodology">
-    <h1>Methodology & Assumptions</h1>
+    <h1>Metodología y Supuestos</h1>
 
-    <h2>Data Sources</h2>
+    <h2>Fuentes de Datos</h2>
     <ul>
         {% for source in data.methodology.data_sources %}
         <li>{{ source }}</li>
         {% endfor %}
     </ul>
 
-    <h2>Financial Assumptions</h2>
+    <h2>Supuestos Financieros</h2>
     <table>
         <tbody>
             {% for label, value in data.methodology.financial_assumptions.items() %}
@@ -20,7 +20,7 @@
         </tbody>
     </table>
 
-    <h2>Glossary</h2>
+    <h2>Glosario</h2>
     <table>
         <tbody>
             {% for label, value in data.methodology.glossary.items() %}

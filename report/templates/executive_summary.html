@@ -1,22 +1,22 @@
-<h1>Executive Summary</h1>
+<h1>Resumen Ejecutivo</h1>
 <p>{{ data.assessment }}</p>
 
 <div class="kpi-row">
     <div class="kpi-card">
         <span class="kpi-number">{{ data.total_value | currency }}</span>
-        <span class="kpi-label">Total Value</span>
+        <span class="kpi-label">Valor Total Detectado</span>
     </div>
     <div class="kpi-card">
         <span class="kpi-number">{{ data.systems_analyzed }}</span>
-        <span class="kpi-label">Systems Analyzed</span>
+        <span class="kpi-label">Sistemas Analizados</span>
     </div>
     <div class="kpi-card">
         <span class="kpi-number">{{ data.opportunities_found }}</span>
-        <span class="kpi-label">Opportunities Found</span>
+        <span class="kpi-label">Oportunidades Detectadas</span>
     </div>
 </div>
 
-<h2>Key Findings</h2>
+<h2>Hallazgos Principales</h2>
 <ul>
     {% for finding in data.key_findings %}
     <li>{{ finding }}</li>
@@ -25,7 +25,7 @@
 
 {% if data.key_risks %}
 <div class="warning-box">
-    <strong>Key Risks</strong>
+    <strong>Riesgos Principales</strong>
     <ul>
         {% for risk in data.key_risks %}
         <li>{{ risk }}</li>

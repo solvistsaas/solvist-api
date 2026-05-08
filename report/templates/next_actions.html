@@ -1,39 +1,39 @@
-<h1>Recommended Next Actions</h1>
+<h1>Próximas Acciones Recomendadas</h1>
 
 <div class="action-period">
-    <h3>This Week</h3>
+    <h3>Esta Semana</h3>
     {% for action in data.actions.this_week %}
     <div class="action-item" data-number="{{ action.number }}">{{ action.text }}</div>
     {% endfor %}
 </div>
 
 <div class="action-period">
-    <h3>Next 30 Days</h3>
+    <h3>Próximos 30 Días</h3>
     {% for action in data.actions.next_30_days %}
     <div class="action-item" data-number="{{ action.number }}">{{ action.text }}</div>
     {% endfor %}
 </div>
 
 <div class="action-period">
-    <h3>Next 90 Days</h3>
+    <h3>Próximos 90 Días</h3>
     {% for action in data.actions.next_90_days %}
     <div class="action-item" data-number="{{ action.number }}">{{ action.text }}</div>
     {% endfor %}
 </div>
 
-<h2>Estimated Value by Action Window</h2>
+<h2>Valor Estimado por Ventana de Acción</h2>
 <table>
     <tbody>
         <tr>
-            <td>This week</td>
+            <td>Esta semana</td>
             <td class="number">{{ data.actions.estimated_value.this_week | currency }}</td>
         </tr>
         <tr>
-            <td>Next 30 days</td>
+            <td>Próximos 30 días</td>
             <td class="number">{{ data.actions.estimated_value.next_30 | currency }}</td>
         </tr>
         <tr>
-            <td>Next 90 days</td>
+            <td>Próximos 90 días</td>
             <td class="number">{{ data.actions.estimated_value.next_90 | currency }}</td>
         </tr>
     </tbody>
