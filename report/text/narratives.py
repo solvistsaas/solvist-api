@@ -239,7 +239,7 @@ OPPORTUNITY_NARRATIVES = {
         "talking_points": [
             "La expansión aprovecha la infraestructura de conexión existente — reducción de costos del 25%",
             "ITC al 30% cubre la ampliación igual que la instalación original",
-            "Más producción solar, mayor ahorro y mejor payback",
+            "Mayor generación, reducción de costes operativos y mejora del retorno sobre activos existentes.",
         ],
     },
 }
