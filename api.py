@@ -986,10 +986,18 @@ def core_score_all_installations():
                     
                     for inst in installations:
                         print("PROCESSING INSTALLATION:", inst)
+                        # Extract fields from installation dict (supports both kwp and system_size_kwp)
+                        inst_kwp = inst.get("system_size_kwp") or inst.get("kwp") or 0
+                        inst_location = inst.get("location_type", "residential")
                         result = compute_opportunity_score(
-                            installation=inst,
-                            weights=weights,
-                            now_year=now_year,
+                            installation_id=inst.get("id", ""),
+                            company_id=inst.get("company_id", ""),
+                            kwp=float(inst_kwp),
+                            installation_year=inst.get("installation_year"),
+                            has_battery=inst.get("has_battery"),
+                            has_maintenance_contract=inst.get("has_maintenance_contract"),
+                            location_type=str(inst_location).lower(),
+                            estimated_consumption=inst.get("estimated_consumption"),
                             calculated_month=calculated_month
                         )
 
@@ -2716,11 +2724,19 @@ async def public_portfolio_scan(
 
         scored_clients: List[Dict] = []
         for inst in installations:
+            # Extract fields from installation dict (supports both kwp and system_size_kwp)
+            inst_kwp = inst.get("system_size_kwp") or inst.get("kwp") or 0
+            inst_location = inst.get("location_type", "residential")
             result = compute_opportunity_score(
-                installation=inst,
-                weights=weights,
-                now_year=now_year,
-                calculated_month=calculated_month,
+                installation_id=inst.get("id", ""),
+                company_id=inst.get("company_id", ""),
+                kwp=float(inst_kwp),
+                installation_year=inst.get("installation_year"),
+                has_battery=inst.get("has_battery"),
+                has_maintenance_contract=inst.get("has_maintenance_contract"),
+                location_type=str(inst_location).lower(),
+                estimated_consumption=inst.get("estimated_consumption"),
+                calculated_month=calculated_month
             )
 
             if not result.get("is_opportunity", False):
