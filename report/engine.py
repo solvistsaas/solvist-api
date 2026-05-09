@@ -31,6 +31,7 @@ from report.text.narratives import (
     FINDING_TEMPLATES,
     ASSESSMENT_TEXTS,
     ASSESSMENT_TEMPLATES,
+    get_assessment_text,
     RISK_TEMPLATES,
     OPPORTUNITY_NARRATIVES,
     DEMAND_CHARGE_NARRATIVE,
@@ -643,14 +644,15 @@ def _generate_assessment(
     if not opportunities:
         return "No se identificaron oportunidades significativas en este portafolio."
 
+    num_ops = len(opportunities)
     if total_value > 500_000:
-        return ASSESSMENT_TEXTS["excellent"]
+        return get_assessment_text("excellent", total_value, num_ops)
     elif total_value > 200_000:
-        return ASSESSMENT_TEXTS["good"]
+        return get_assessment_text("good", total_value, num_ops)
     elif total_value > 50_000:
-        return ASSESSMENT_TEXTS["moderate"]
+        return get_assessment_text("moderate", total_value, num_ops)
 
-    return ASSESSMENT_TEXTS["low"]
+    return get_assessment_text("low", total_value, num_ops)
 
 
 # ─── Recommended actions generator ────────────────────────────────────────────

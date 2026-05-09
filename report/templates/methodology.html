@@ -3,11 +3,16 @@
 
     <h2>Fuentes de Datos</h2>
     {% if data.methodology.data_sources %}
+    {% set sources_clean = data.methodology.data_sources | select | list %}
+    {% if sources_clean %}
     <ul>
-        {% for source in data.methodology.data_sources %}
-        <li>{{ source }}</li>
+        {% for source in sources_clean %}
+        {% if source and source|trim %}
+        <li>{{ source|trim }}</li>
+        {% endif %}
         {% endfor %}
     </ul>
+    {% endif %}
     {% endif %}
 
     <h2>Supuestos Financieros</h2>

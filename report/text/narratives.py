@@ -35,23 +35,22 @@ FINDING_TEMPLATES = {
 
 # === HEALTH ASSESSMENT (para el Executive Summary) ===
 
+def get_assessment_text(level: str, total_value: float = 0, num_opportunities: int = 0) -> str:
+    """Generate assessment text with real data interpolation."""
+    texts = {
+        "excellent": f"Se identificaron {num_opportunities} oportunidades prioritarias con un potencial económico acumulado de ${total_value:,.0f}, concentradas principalmente en sistemas sin almacenamiento energético.",
+        "good": f"El análisis detecta {num_opportunities} oportunidades con un valor económico combinado de ${total_value:,.0f}, distribuidas en múltiples categorías de intervención.",
+        "moderate": f"Se identificaron {num_opportunities} oportunidades de optimización con un potencial estimado de ${total_value:,.0f}. Se recomienda priorizar las actuaciones de mayor impacto financiero.",
+        "low": f"La cartera presenta {num_opportunities} oportunidades de mejora con un potencial estimado de ${total_value:,.0f}. Se recomienda una revisión técnica preventiva como primer paso.",
+    }
+    return texts.get(level, texts["moderate"])
+
+# Compatibilidad — strings estáticos si no se pasan parámetros
 ASSESSMENT_TEXTS = {
-    "excellent": (
-        "La cartera presenta un potencial de recuperación excepcional "
-        "con oportunidades de alto valor listas para activar."
-    ),
-    "good": (
-        "La cartera muestra oportunidades de valor significativo "
-        "distribuidas en múltiples sistemas."
-    ),
-    "moderate": (
-        "La cartera presenta oportunidades moderadas con margen de mejora "
-        "en eficiencia y rentabilidad."
-    ),
-    "low": (
-        "La cartera muestra potencial limitado en el horizonte actual. "
-        "Se recomienda revisión técnica preventiva."
-    ),
+    "excellent": "La cartera presenta un potencial de recuperación excepcional con oportunidades de alto valor listas para activar.",
+    "good": "La cartera muestra oportunidades de valor significativo distribuidas en múltiples sistemas.",
+    "moderate": "La cartera presenta oportunidades moderadas con margen de mejora en eficiencia y rentabilidad.",
+    "low": "La cartera muestra potencial limitado en el horizonte actual. Se recomienda revisión técnica preventiva.",
 }
 
 # Alias de compatibilidad
@@ -99,7 +98,7 @@ OPPORTUNITY_NARRATIVES = {
         "talking_points": [
             "Tu sistema genera ${annual_savings:,.0f}/año en energía que no estás almacenando",
             "El ITC federal cubre el 30% — el costo neto es ${net_cost:,.0f}, no ${gross_cost:,.0f}",
-            "El programa CBES tiene cupos de solicitud limitados disponibles",
+            "El programa CBES mantiene disponibilidad limitada para nuevas solicitudes en el ejercicio actual.",
         ],
     },
     "industrial_battery": {
@@ -117,7 +116,7 @@ OPPORTUNITY_NARRATIVES = {
         "talking_points": [
             "Tu sistema genera ${annual_savings:,.0f}/año en energía que no estás almacenando",
             "El ITC federal cubre el 30% — el costo neto es ${net_cost:,.0f}, no ${gross_cost:,.0f}",
-            "El programa CBES tiene cupos de solicitud limitados disponibles",
+            "El programa CBES mantiene disponibilidad limitada para nuevas solicitudes en el ejercicio actual.",
         ],
     },
     "maintenance": {
@@ -235,7 +234,7 @@ OPPORTUNITY_NARRATIVES = {
             "y mejoraría el retorno sobre la infraestructura existente."
         ),
         "warning": (
-            "La ventana ITC al 30% vigente hasta 2032 hace que este sea el momento óptimo para ampliar."
+            "La vigencia del crédito ITC al 30% hasta 2032 representa una ventana de actuación con retorno máximo sobre la inversión."
         ),
         "talking_points": [
             "La expansión aprovecha la infraestructura de conexión existente — reducción de costos del 25%",

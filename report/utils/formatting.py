@@ -1,5 +1,12 @@
 """Formatting utilities for PDF report generation."""
 
+from datetime import datetime
+
+MESES_ES = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+    7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+}
+
 
 def format_currency(value, symbol: str = "$") -> str:
     """Format currency value with thousands separator."""
@@ -60,4 +67,6 @@ def format_roi(net_investment, annual_savings) -> str:
 
 def format_date(date_obj) -> str:
     """Format date for cover page."""
-    return date_obj.strftime("%B %Y")
+    if date_obj is None:
+        date_obj = datetime.now()
+    return f"{MESES_ES[date_obj.month]} {date_obj.year}"

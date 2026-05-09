@@ -10,7 +10,7 @@ LABELS = {
 
     # Métricas
     "value": "VALOR",
-    "close_prob": "PROB. CIERRE",
+    "close_prob": "CONV.",
     "payback": "RETORNO",
     "annual_savings": "AHORRO ANUAL",
     "net_investment": "INVERSIÓN NETA",

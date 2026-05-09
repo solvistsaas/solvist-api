@@ -17,19 +17,28 @@
 </div>
 
 <h2>Hallazgos Principales</h2>
+{% if data.key_findings %}
 <ul>
     {% for finding in data.key_findings %}
-    <li>{{ finding }}</li>
+    {% if finding and finding|trim %}
+    <li>{{ finding|trim }}</li>
+    {% endif %}
     {% endfor %}
 </ul>
+{% endif %}
 
 {% if data.key_risks %}
 <div class="warning-box">
     <strong>Riesgos Principales</strong>
+    {% set risks_clean = data.key_risks | select | list %}
+    {% if risks_clean %}
     <ul>
-        {% for risk in data.key_risks %}
-        <li>{{ risk }}</li>
+        {% for risk in risks_clean %}
+        {% if risk and risk|trim %}
+        <li>{{ risk|trim }}</li>
+        {% endif %}
         {% endfor %}
     </ul>
+    {% endif %}
 </div>
 {% endif %}
